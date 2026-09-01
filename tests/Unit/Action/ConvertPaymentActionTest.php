@@ -195,6 +195,33 @@ final class ConvertPaymentActionTest extends TestCase
         self::assertStringContainsString(self::TOKEN_HASH, $startData->urls->success);
     }
 
+    public function testANullTokenIsLoudNotARawError(): void
+    {
+        // A `Convert` konstruktora explicit megengedi a null tokent
+        // (`?TokenInterface $token = null`), és egy puszta
+        // `new Capture($payment)` nyomán induló `Convert` élesben is
+        // adhat ilyet. A vendor docblockja ("mindig van token") téves —
+        // ez a teszt a valós, mért viselkedést védi: névvel ellátott,
+        // kifogható kivétel jár, nem egy nyers `Error`.
+        $this->expectException(IncompletePaymentException::class);
+
+        $request = new Convert($this->payment(), 'array', null);
+
+        new ConvertPaymentAction($this->urlGenerator())->execute($request);
+    }
+
+    public function testAnEmptyTokenHashIsLoud(): void
+    {
+        $token = $this->createStub(TokenInterface::class);
+        $token->method('getHash')->willReturn('');
+
+        $this->expectException(IncompletePaymentException::class);
+
+        $request = new Convert($this->payment(), 'array', $token);
+
+        new ConvertPaymentAction($this->urlGenerator())->execute($request);
+    }
+
     public function testTheAttemptStartsAtOneForAFreshPayment(): void
     {
         self::assertSame(1, $this->startData($this->convert($this->payment()))->attempt);

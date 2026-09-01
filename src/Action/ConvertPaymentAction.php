@@ -210,16 +210,18 @@ final class ConvertPaymentAction implements ActionInterface
 
     private function urls(Convert $request): Urls
     {
-        // A `Convert::getToken()` a Payum-csomag szerint mindig tokent ad —
-        // a Sylius `CapturePaymentAction` és `AuthorizePaymentAction` is a
-        // saját tokenjével hozza létre a `Convert`-et. Csak a hash tényleges
-        // tartalmát ellenőrizzük: az `üres string` egy valós, típus által
-        // nem kizárt eset.
-        $hash = $request->getToken()->getHash();
+        // A `Convert` konstruktora explicit nullable tokent enged
+        // (`?TokenInterface $token = null`) — a vendor docblockja ezt
+        // tévesen `@return TokenInterface`-ként ígéri, de a
+        // `stubs/PayumConvert.stub.php` ezt a PHPStan felé javítja, hogy a
+        // guard ne tűnjön holt kódnak. Null token esetén nincs miből
+        // visszatérési URL-eket előállítani.
+        $token = $request->getToken();
+        $hash = null === $token ? null : $token->getHash();
 
-        if ('' === $hash) {
+        if (null === $hash || '' === $hash) {
             throw new IncompletePaymentException(
-                'A capture-höz tartozó Payum token hash-e üres, ezért a visszatérési címek nem állíthatók elő.',
+                'A capture-höz nincs Payum token (vagy annak hash-e üres), ezért a visszatérési címek nem állíthatók elő.',
             );
         }
 
