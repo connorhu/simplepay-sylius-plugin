@@ -134,15 +134,11 @@ final class RefundCommand extends Command
 
             $settings = GatewayConfigReader::read($method);
 
-            // A Payum regiszterben a gateway a `gatewayName` alatt fut, ami a
-            // fizetési mód kódjából generálódik (kisbetűsítve, aláhúzással) —
-            // NEM egyezik meg mindig a `getCode()` nyers értékével. A `getCode()`
-            // itt téves gateway-nevet adna minden olyan kódnál, amiben szóköz,
-            // kötőjel vagy nagybetű van, és a `getGateway()` hívás egy valódi
-            // jóváírás közben futna el hangos hibával.
-            $gatewayName = $method->getGatewayConfig()?->getGatewayName() ?? throw new \LogicException(
-                'A SimplePay gateway konfigurációjából hiányzik a Payum gateway neve.',
-            );
+            // Lásd `GatewayConfigReader::gatewayName()` docblockját: a
+            // `getCode()` NEM feltétlenül a Payum gateway neve. Ugyanezt a
+            // felolvasást az `IpnController` is használja — R27 szünteti
+            // meg a korábbi duplikációt.
+            $gatewayName = GatewayConfigReader::gatewayName($method);
 
             $minorUnits = SyliusAmountConverter::toMinorUnits($syliusAmount, $settings->currency);
 

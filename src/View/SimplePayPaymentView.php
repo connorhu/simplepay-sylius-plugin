@@ -7,6 +7,7 @@ namespace CodeConjure\SyliusSimplePayPlugin\View;
 use CodeConjure\SimplePayPayum\Details;
 use CodeConjure\SimplePayPayum\Model\IpnLogEntry;
 use CodeConjure\SimplePayPayum\Model\TransactionState;
+use CodeConjure\SyliusSimplePayPlugin\Exception\GatewayMismatchException;
 use CodeConjure\SyliusSimplePayPlugin\Gateway\GatewayConfigReader;
 use Sylius\Component\Core\Model\PaymentInterface;
 
@@ -29,11 +30,28 @@ final readonly class SimplePayPaymentView
     ) {
     }
 
+    /**
+     * `isSimplePay()` csak a `factoryName`-et nézi, a `read()` viszont a
+     * `merchant`/`environment`/`currency` mezőket is megköveteli. Egy olyan
+     * telepítésen, ahol MÁR VAN egy SimplePay fizetési mód a RÉGI konfig-
+     * alakban — amit ez az ág migráció nélkül töröl (lásd a specifikáció
+     * 11. pontját) —, a `factoryName` még "simplepay", de a `read()` mégis
+     * `GatewayMismatchException`-t dobna. Ez a nézet egy Twig-függvényből
+     * fut, try nélkül, a rendelés fizetéseinek CIKLUSÁBAN — az admin
+     * rendelés-oldal nem omolhat össze emiatt. A hiányos konfiguráció
+     * hangos helye a fizetési mód SZERKESZTŐ oldala, nem ez a nézet (R27).
+     */
     public static function forPayment(PaymentInterface $payment): ?self
     {
         $method = $payment->getMethod();
 
         if (null === $method || !GatewayConfigReader::isSimplePay($method)) {
+            return null;
+        }
+
+        try {
+            $environment = GatewayConfigReader::read($method)->environment->value;
+        } catch (GatewayMismatchException) {
             return null;
         }
 
@@ -43,7 +61,7 @@ final readonly class SimplePayPaymentView
         return new self(
             transactionId: $state->transactionId,
             status: $state->status?->value,
-            environment: GatewayConfigReader::read($method)->environment->value,
+            environment: $environment,
             lastIpnAt: $lastEntry?->receivedAt,
             // Ha bármelyik bejegyzés ismétlődött, a visszaigazolásunkat
             // nem fogadták el. Ez a felület egyetlen figyelmeztetése.

@@ -181,6 +181,37 @@ esemény-jelzővel:
 
 A protokoll-csomag mindig a differenciált `urls` formát küldi, sosem a string `url`-t.
 
+**FRISSÍTÉS (a záró átvizsgálás 1. találata, R25 döntés nyomán) — a `payum_token` NEM a
+capture token hash-e.** Az eredeti terv ezt hallgatólagosan feltételezte, és ez tévedés volt:
+a capture token `targetUrl`-je a `/payment/capture/{hash}` útvonal, a vevő viszont a plugin
+saját `codeconjure_simplepay_return` route-jára tér vissza. A `Payum\Core\Security\Util\
+RequestTokenVerifier::isValid()` a bejövő kérés és a token célútvonalát NYERS
+karakterlánc-egyenlőséggel hasonlítja — a kettő sosem egyezett volna, és minden visszatérés
+HTTP 400-at dobott volna, mielőtt a `Sync` egyáltalán lefutott.
+
+A tényleges megoldás: a `ConvertPaymentAction` megvalósítja a
+`Payum\Core\Security\GenericTokenFactoryAwareInterface`-t. A Payum ezt minden gateway
+felépítésekor automatikusan behuzalozza (`GenericTokenFactoryExtension`,
+`PayumBuilder::buildGateway()`) — **nincs szükség saját szolgáltatás-bekötésre**. Az akció a
+kapott gyárral egyetlen, DEDIKÁLT tokent mintáz a visszatérés route-jára, a capture token
+gateway nevével és `afterUrl`-jével:
+
+```php
+$genericTokenFactory->createToken(
+    $captureToken->getGatewayName(),
+    $payment,
+    ConvertPaymentAction::RETURN_ROUTE,
+    [],
+    $captureToken->getAfterUrl(), // már teljes URL — az AbstractTokenFactory ezt
+                                   // változtatás nélkül állítja be `afterUrl`-ként
+);
+```
+
+Mivel a `RequestTokenVerifier` csak az útvonalat nézi, a lekérdezés-stringet nem, EZ AZ EGY
+token szolgálja ki mind a négy URL-t — azok csak az `e` paraméterben térnek el. A végső
+átirányítás a mintázott token `afterUrl`-jén keresztül ugyanarra az oldalra visz, mint a
+capture folyamat (a Sylius szokásos köszönő/hibaoldalára).
+
 ## 5. Admin gateway űrlap
 
 | mező | típus | megjegyzés |

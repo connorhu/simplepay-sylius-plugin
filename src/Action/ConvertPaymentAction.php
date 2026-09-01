@@ -14,6 +14,7 @@ use CodeConjure\SimplePayPayum\Model\StartData;
 use CodeConjure\SimplePayPayum\Model\TransactionState;
 use CodeConjure\SyliusSimplePayPlugin\Exception\GatewayMismatchException;
 use CodeConjure\SyliusSimplePayPlugin\Exception\IncompletePaymentException;
+use CodeConjure\SyliusSimplePayPlugin\Exception\MissingGenericTokenFactoryException;
 use CodeConjure\SyliusSimplePayPlugin\Gateway\GatewayConfigReader;
 use CodeConjure\SyliusSimplePayPlugin\Language\LocaleToLanguageMap;
 use CodeConjure\SyliusSimplePayPlugin\Money\SyliusAmountConverter;
@@ -21,6 +22,9 @@ use CodeConjure\SyliusSimplePayPlugin\Order\OrderReference;
 use Payum\Core\Action\ActionInterface;
 use Payum\Core\Exception\RequestNotSupportedException;
 use Payum\Core\Request\Convert;
+use Payum\Core\Security\GenericTokenFactoryAwareInterface;
+use Payum\Core\Security\GenericTokenFactoryInterface;
+use Payum\Core\Security\TokenInterface;
 use Sylius\Component\Core\Model\AddressInterface;
 use Sylius\Component\Core\Model\OrderInterface;
 use Sylius\Component\Core\Model\PaymentInterface;
@@ -38,12 +42,25 @@ use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
  * egyszerre ismerte a Payum `Capture`-t, a Sylius `Order`-t és a SimplePay
  * mezőneveit.
  */
-final class ConvertPaymentAction implements ActionInterface
+final class ConvertPaymentAction implements ActionInterface, GenericTokenFactoryAwareInterface
 {
     public const string RETURN_ROUTE = 'codeconjure_simplepay_return';
 
+    /**
+     * A Payum a `GenericTokenFactoryExtension`-en keresztül, minden
+     * gateway-hívás előtt beállítja — lásd `setGenericTokenFactory()`.
+     * Ezért nem konstruktor-paraméter: az akciót a Payum konténer építi
+     * fel a gateway-től függetlenül, a gyárat pedig a gateway adja hozzá.
+     */
+    private ?GenericTokenFactoryInterface $genericTokenFactory = null;
+
     public function __construct(private readonly UrlGeneratorInterface $urlGenerator)
     {
+    }
+
+    public function setGenericTokenFactory(?GenericTokenFactoryInterface $genericTokenFactory = null): void
+    {
+        $this->genericTokenFactory = $genericTokenFactory;
     }
 
     /**
@@ -94,7 +111,7 @@ final class ConvertPaymentAction implements ActionInterface
             currency: $currency,
             customerEmail: $this->customerEmail($order),
             invoice: $this->invoice($order),
-            urls: $this->urls($request),
+            urls: $this->urls($request, $payment),
             language: LocaleToLanguageMap::resolve($order->getLocaleCode()),
             // Fixen CARD: a WIRE élőben sosem lett kipróbálva, és az
             // átutalásos folyamat állapotkezelését egyik csomag sem modellezi.
@@ -208,7 +225,21 @@ final class ConvertPaymentAction implements ActionInterface
             : trim($value);
     }
 
-    private function urls(Convert $request): Urls
+    /**
+     * A négy visszatérési URL nem a capture tokenre mutat: annak
+     * `targetUrl`-je a `/payment/capture/{hash}` útvonal, a vevő viszont a
+     * plugin saját `codeconjure_simplepay_return` route-jára tér vissza. A
+     * `RequestTokenVerifier::isValid()` a célútvonalakat nyers
+     * karakterlánc-egyenlőséggel hasonlítja — a kettő sosem egyezne, és a
+     * visszatérés minden esetben HTTP 400-at dobna.
+     *
+     * Ezért itt egy DEDIKÁLT tokent állítunk elő a `GenericTokenFactory`-n
+     * keresztül, ami a visszatérés route-jára mutat. A `RequestTokenVerifier`
+     * csak az útvonalat nézi, a lekérdezés-stringet nem — így ez az EGY
+     * token szolgálja ki mind a négy címet, amik csak az `e` paraméterben
+     * térnek el.
+     */
+    private function urls(Convert $request, PaymentInterface $payment): Urls
     {
         // A `Convert` konstruktora explicit nullable tokent enged
         // (`?TokenInterface $token = null`) — a vendor docblockja ezt
@@ -216,12 +247,19 @@ final class ConvertPaymentAction implements ActionInterface
         // `stubs/PayumConvert.stub.php` ezt a PHPStan felé javítja, hogy a
         // guard ne tűnjön holt kódnak. Null token esetén nincs miből
         // visszatérési URL-eket előállítani.
-        $token = $request->getToken();
-        $hash = null === $token ? null : $token->getHash();
+        $captureToken = $request->getToken();
 
-        if (null === $hash || '' === $hash) {
+        if (null === $captureToken) {
             throw new IncompletePaymentException(
-                'A capture-höz nincs Payum token (vagy annak hash-e üres), ezért a visszatérési címek nem állíthatók elő.',
+                'A capture-höz nincs Payum token, ezért a visszatérési címek nem állíthatók elő.',
+            );
+        }
+
+        $hash = $this->returnToken($captureToken, $payment)->getHash();
+
+        if ('' === $hash) {
+            throw new IncompletePaymentException(
+                'A visszatérési token hash-e üres, ezért a visszatérési címek nem állíthatók elő.',
             );
         }
 
@@ -230,6 +268,33 @@ final class ConvertPaymentAction implements ActionInterface
             fail: $this->returnUrl($hash, ReturnEvent::Fail),
             cancel: $this->returnUrl($hash, ReturnEvent::Cancel),
             timeout: $this->returnUrl($hash, ReturnEvent::Timeout),
+        );
+    }
+
+    /**
+     * A `createToken()` ötödik paramétere (`$afterPath`) a vendor
+     * `AbstractTokenFactory::createToken()`-jében kettős szerepű: ha
+     * `http`-vel kezdődik, változatlan URL-ként kerül a tokenre, egyébként
+     * route névként generálódik. A capture token `getAfterUrl()`-je már
+     * teljes, abszolút URL (a Sylius köszönő/hibaoldala), ezért ide
+     * változtatás nélkül átadható — a végső átirányítás így a capture
+     * folyamattal azonos oldalra visz.
+     */
+    private function returnToken(TokenInterface $captureToken, PaymentInterface $payment): TokenInterface
+    {
+        if (null === $this->genericTokenFactory) {
+            throw new MissingGenericTokenFactoryException(
+                'A GenericTokenFactory nem érkezett meg a Convert-akcióhoz — '
+                . 'a visszatérési tokent nem lehet előállítani.',
+            );
+        }
+
+        return $this->genericTokenFactory->createToken(
+            $captureToken->getGatewayName(),
+            $payment,
+            self::RETURN_ROUTE,
+            [],
+            $captureToken->getAfterUrl(),
         );
     }
 

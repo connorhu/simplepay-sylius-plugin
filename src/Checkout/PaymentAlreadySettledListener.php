@@ -63,9 +63,11 @@ final class PaymentAlreadySettledListener
             return;
         }
 
-        $gateway = $this->payum->getGateway($token->getGatewayName());
-
         try {
+            // A `getGateway()` a try-ON BELÜL: egy fel nem oldható gateway
+            // név itt dobna, és ez a legrosszabb hely, ahonnan egy kivétel
+            // kiszökhetne — ez EGY `kernel.exception` FIGYELŐ (R28).
+            $gateway = $this->payum->getGateway($token->getGatewayName());
             $gateway->execute(new Sync($token));
             $gateway->execute(new GetHumanStatus($token));
             $this->entityManager->flush();

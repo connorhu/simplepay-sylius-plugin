@@ -48,6 +48,26 @@ final class GatewayConfigReader
         return self::FACTORY_NAME === $paymentMethod->getGatewayConfig()?->getFactoryName();
     }
 
+    /**
+     * A Payum regiszterben a gateway a `gatewayName` alatt fut, ami a
+     * fizetési mód kódjából generálódik (kisbetűsítve, aláhúzással) — NEM
+     * egyezik meg mindig a `getCode()` nyers értékével. A `getCode()` itt
+     * téves gateway-nevet adna minden olyan kódnál, amiben szóköz, kötőjel
+     * vagy nagybetű van, és a `Payum::getGateway()` hívás egy valódi
+     * jóváírás vagy IPN-feldolgozás közben futna el hangos hibával.
+     *
+     * KORÁBBAN ez a felolvasás szó szerint duplikálva élt az
+     * `IpnController`-ben és a `RefundCommand`-ban — R27 ezt a duplikációt
+     * szünteti meg: a hiba EGY helyen van megnevezve.
+     */
+    public static function gatewayName(PaymentMethodInterface $paymentMethod): string
+    {
+        return $paymentMethod->getGatewayConfig()?->getGatewayName() ?? throw new GatewayMismatchException(sprintf(
+            'A(z) "%s" fizetési mód gateway konfigurációjából hiányzik a Payum gateway neve.',
+            (string) $paymentMethod->getCode(),
+        ));
+    }
+
     /** @param array<array-key, mixed> $config */
     private static function string(array $config, string $key): string
     {

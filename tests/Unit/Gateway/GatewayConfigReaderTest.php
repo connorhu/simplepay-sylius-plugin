@@ -15,11 +15,15 @@ use Sylius\Component\Payment\Model\PaymentMethodInterface;
 final class GatewayConfigReaderTest extends TestCase
 {
     /** @param array<string, mixed> $config */
-    private function paymentMethod(?string $factoryName, array $config = []): PaymentMethodInterface
-    {
+    private function paymentMethod(
+        ?string $factoryName,
+        array $config = [],
+        ?string $gatewayName = 'simplepay_gateway',
+    ): PaymentMethodInterface {
         $gatewayConfig = $this->createStub(GatewayConfigInterface::class);
         $gatewayConfig->method('getFactoryName')->willReturn($factoryName);
         $gatewayConfig->method('getConfig')->willReturn($config);
+        $gatewayConfig->method('getGatewayName')->willReturn($gatewayName);
 
         $paymentMethod = $this->createStub(PaymentMethodInterface::class);
         $paymentMethod->method('getGatewayConfig')->willReturn(null === $factoryName ? null : $gatewayConfig);
@@ -133,5 +137,31 @@ final class GatewayConfigReaderTest extends TestCase
         $settings = GatewayConfigReader::read($this->paymentMethod('simplepay', $config));
 
         self::assertSame('0', $settings->merchant);
+    }
+
+    /**
+     * R27 (3. találat): a `gatewayName()`-t korábban szó szerint
+     * duplikálva tartotta az `IpnController` és a `RefundCommand` — ez a
+     * teszt a KIEMELT, közös felolvasást fedi le.
+     */
+    public function testGatewayNameReadsThePayumGatewayNameFromTheConfig(): void
+    {
+        $paymentMethod = $this->paymentMethod('simplepay', self::config(), gatewayName: 'simplepay_46f2');
+
+        self::assertSame('simplepay_46f2', GatewayConfigReader::gatewayName($paymentMethod));
+    }
+
+    public function testGatewayNameIsLoudWhenTheGatewayConfigHasNoGatewayName(): void
+    {
+        $this->expectException(GatewayMismatchException::class);
+
+        GatewayConfigReader::gatewayName($this->paymentMethod('simplepay', self::config(), gatewayName: null));
+    }
+
+    public function testGatewayNameIsLoudWhenThereIsNoGatewayConfigAtAll(): void
+    {
+        $this->expectException(GatewayMismatchException::class);
+
+        GatewayConfigReader::gatewayName($this->paymentMethod(null));
     }
 }

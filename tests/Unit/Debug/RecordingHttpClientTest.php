@@ -28,6 +28,13 @@ final class RecordingHttpClientTest extends TestCase
 
     protected function tearDown(): void
     {
+        // Az egyik teszt (lásd lentebb) szándékosan eltünteti a
+        // könyvtárat, hogy a válasz rögzítésének hibáját szimulálja —
+        // ilyenkor itt már nincs mit takarítani.
+        if (!is_dir($this->directory)) {
+            return;
+        }
+
         foreach (glob($this->directory . '/*') ?: [] as $file) {
             unlink($file);
         }
@@ -170,6 +177,46 @@ final class RecordingHttpClientTest extends TestCase
         $this->expectException(\RuntimeException::class);
 
         @$client->sendRequest($this->request());
+    }
+
+    public function testAResponseRecordingFailureDoesNotLoseTheAlreadyReceivedResponse(): void
+    {
+        // R (5. találat): a VALÓDI hívás (itt: a belső kliens válasza) MÁR
+        // MEGTÖRTÉNT, mire a válasz rögzítése elbukna. A belső kliens ezt
+        // szimulálja: a könyvtárat SAJÁT `sendRequest()`-jén belül tünteti
+        // el, pontosan a valódi hívás UTÁN, a rögzítés ELŐTT — így a kérés
+        // fájlja már rögzült, mire ez történik, de a válaszé nem tud. A
+        // hívónak a választ MÉGIS meg kell kapnia, kivétel nélkül.
+        $directory = $this->directory;
+        $inner = new class($directory) implements \Psr\Http\Client\ClientInterface {
+            public function __construct(private readonly string $directory)
+            {
+            }
+
+            public function sendRequest(\Psr\Http\Message\RequestInterface $request): \Psr\Http\Message\ResponseInterface
+            {
+                foreach (glob($this->directory . '/*') ?: [] as $file) {
+                    unlink($file);
+                }
+
+                rmdir($this->directory);
+
+                return new Response(200, [], '{"refundTotal":500}');
+            }
+        };
+
+        $client = new RecordingHttpClient($inner, $directory, enabled: true);
+
+        // A `@`: a hiányzó könyvtár miatt a natív `file_put_contents()`
+        // saját PHP-figyelmeztetést is kibocsát — ugyanaz a minta, mint a
+        // `testAWriteFailureIsNotSwallowedItThrows`-ban. A lényeg NEM a
+        // figyelmeztetés elnyomása, hanem hogy a hívás emiatt NEM dob.
+        $response = @$client->sendRequest($this->request());
+
+        self::assertSame('{"refundTotal":500}', (string) $response->getBody());
+        // A kérés fájlja rögzült (a könyvtár akkor még létezett), a
+        // válaszé nem tudott — de a hívás emiatt NEM dobott.
+        self::assertCount(1, $client->recordedFiles());
     }
 
     public function testItCanBeTurnedOnAtRuntime(): void

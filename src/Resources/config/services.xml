@@ -14,6 +14,18 @@
             <tag name="payum.action" factory="simplepay"/>
         </service>
 
+        <!-- A payum.extension tag "factory" attribútuma ugyanúgy a
+             simplepay gateway-re korlátozza, mint a payum.action fent.
+             R26 (2. találat): a Sylius CapturePaymentAction csak akkor
+             futtatja újra a Convert-et, ha a GetStatus NEW-t jelent — egy
+             halott tranzakcióra (CANCELLED, TIMEOUT, NOTAUTHORIZED, FRAUD)
+             ez sosem igaz. Ez a kiterjesztés a beágyazott GetStatus-t
+             NEW-ra jelöli át ilyenkor, hogy a vendor kód a Convert-et
+             mégis lefuttassa. Lásd az osztály docblockját. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension">
+            <tag name="payum.extension" factory="simplepay"/>
+        </service>
+
         <service id="CodeConjure\SyliusSimplePayPlugin\Form\Type\SimplePayGatewayConfigurationType">
             <tag name="sylius.gateway_configuration_type" type="simplepay" label="SimplePay"/>
             <tag name="form.type"/>
@@ -32,6 +44,8 @@
             <argument type="service" id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient.inner"/>
             <argument>%kernel.project_dir%/var/simplepay</argument>
             <argument>false</argument>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="monolog.logger" channel="simplepay"/>
         </service>
 
         <!-- A kernel.exception figyelőnek csak egy sorrendi kikötése van: a

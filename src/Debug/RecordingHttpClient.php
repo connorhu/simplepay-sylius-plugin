@@ -8,6 +8,8 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * PSR-18 dekorátor, ami a nyers kérés- és válasz-törzseket fájlba menti.
@@ -43,11 +45,20 @@ final class RecordingHttpClient implements ClientInterface
     /** @var list<string> */
     private array $recordedFiles = [];
 
+    private readonly LoggerInterface $logger;
+
+    /**
+     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * `null`-t ad, ha nincs naplózó — a paraméter ezért nullable, ugyanaz a
+     * minta, mint a `ReturnController`-ben és az `IpnController`-ben.
+     */
     public function __construct(
         private readonly ClientInterface $inner,
         private readonly string $directory,
         private bool $enabled = false,
+        ?LoggerInterface $logger = null,
     ) {
+        $this->logger = $logger ?? new NullLogger();
     }
 
     public function enable(): void
@@ -83,7 +94,27 @@ final class RecordingHttpClient implements ClientInterface
 
         $response = $this->inner->sendRequest($request);
 
-        $this->write($prefix . '.res.json', $this->readBody($response->getBody()));
+        // A VALÓDI hívás ITT MÁR MEGTÖRTÉNT — jóváírás esetén valódi pénz
+        // mozgott. A válasz rögzítésének hibája (tele lemez, jogosultság)
+        // ezt a tényt nem törölheti el: ha itt hagynánk kiszökni a
+        // kivételt, a hívó (`RefundCommand`) egyik catch-ága sem fogná el
+        // (a `\RuntimeException` nincs a domain-kivételek listáján), a
+        // `flush()` sosem futna le, és a MÁR MEGTÖRTÉNT jóváírás eredménye
+        // (`refundTransactionId`, `refundTotal`) elveszne, miközben a
+        // `simplepay_refund` névtér a memóriában már törölve van. A MÉRÉS
+        // MŰSZERÉNEK hibája ezért itt csak naplózódik, nem szakítja meg a
+        // hívót.
+        try {
+            $this->write($prefix . '.res.json', $this->readBody($response->getBody()));
+        } catch (\RuntimeException $exception) {
+            $this->logger->error(
+                'A SimplePay válasz rögzítése nem sikerült — maga a válasz rendben megérkezett.',
+                [
+                    'event' => 'simplepay.debug.response_recording_failed',
+                    'reason' => $exception->getMessage(),
+                ],
+            );
+        }
 
         return $response;
     }

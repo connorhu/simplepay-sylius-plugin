@@ -86,18 +86,12 @@ final class IpnController
             return new Response('Missing Signature header.', Response::HTTP_BAD_REQUEST);
         }
 
-        // A Payum regiszterben a gateway a `gatewayName` alatt fut, ami a
-        // fizetési mód kódjából generálódik (kisbetűsítve, aláhúzással) —
-        // NEM egyezik meg mindig a `$code` nyers értékével. A `$code`
-        // (ami a route paramétere, tehát a repository-keresésre helyes
-        // kulcs) itt téves gateway-nevet adna minden olyan kódnál, amiben
-        // szóköz, kötőjel, aposztróf vagy nagybetű van — és a `getGateway()`
-        // hívás hangos hibával futna el, ELVISZVE MAGÁVAL AZ EGÉSZ IPN
-        // FELDOLGOZÁST. Ugyanezt a hibát a `RefundCommand` is elkövette,
-        // és ugyanígy javította.
-        $gatewayName = $paymentMethod->getGatewayConfig()?->getGatewayName() ?? throw new \LogicException(
-            'A SimplePay gateway konfigurációjából hiányzik a Payum gateway neve.',
-        );
+        // A `$code` (ami a route paramétere, tehát a repository-keresésre
+        // helyes kulcs) NEM feltétlenül a Payum gateway neve — lásd
+        // `GatewayConfigReader::gatewayName()` docblockját. Ugyanezt a
+        // felolvasást a `RefundCommand` is használja — R27 szünteti meg a
+        // korábbi duplikációt.
+        $gatewayName = GatewayConfigReader::gatewayName($paymentMethod);
 
         $gateway = $this->payum->getGateway($gatewayName);
 

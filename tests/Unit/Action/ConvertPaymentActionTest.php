@@ -9,9 +9,11 @@ use CodeConjure\SimplePayPayum\Model\StartData;
 use CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction;
 use CodeConjure\SyliusSimplePayPlugin\Exception\GatewayMismatchException;
 use CodeConjure\SyliusSimplePayPlugin\Exception\IncompletePaymentException;
+use CodeConjure\SyliusSimplePayPlugin\Exception\MissingGenericTokenFactoryException;
 use CodeConjure\SyliusSimplePayPlugin\Exception\UnrepresentableAmountException;
 use Payum\Core\Exception\RequestNotSupportedException;
 use Payum\Core\Request\Convert;
+use Payum\Core\Security\GenericTokenFactoryInterface;
 use Payum\Core\Security\TokenInterface;
 use PHPUnit\Framework\TestCase;
 use Sylius\Component\Core\Model\AddressInterface;
@@ -25,6 +27,15 @@ use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 final class ConvertPaymentActionTest extends TestCase
 {
     private const string TOKEN_HASH = 'token-hash-123';
+
+    /**
+     * A capture token `afterUrl`-je — a Sylius köszönő/hibaoldala, amire a
+     * mintázott visszatérési tokennek is mutatnia kell (R25).
+     */
+    private const string CAPTURE_AFTER_URL = 'https://bolt.hu/checkout/thank-you';
+
+    /** A `GenericTokenFactory` által mintázott, dedikált visszatérési token hash-e. */
+    private const string RETURN_TOKEN_HASH = 'return-token-hash-456';
 
     private function urlGenerator(): UrlGeneratorInterface
     {
@@ -96,16 +107,38 @@ final class ConvertPaymentActionTest extends TestCase
     {
         $token = $this->createStub(TokenInterface::class);
         $token->method('getHash')->willReturn(self::TOKEN_HASH);
+        $token->method('getGatewayName')->willReturn('simplepay');
+        $token->method('getAfterUrl')->willReturn(self::CAPTURE_AFTER_URL);
 
         return $token;
     }
 
-    /** @return array<string, mixed> */
-    private function convert(PaymentInterface $payment): array
+    /**
+     * A `GenericTokenFactory` dublja: `createToken()`-je mindig a
+     * `$returnHash`-sel rendelkező tokent adja vissza, függetlenül a kapott
+     * paraméterektől. Az, hogy az akció a HELYES paraméterekkel hívja-e meg
+     * (gateway név, `RETURN_ROUTE`, a capture token `afterUrl`-je), külön
+     * teszt tárgya — itt csak az eredmény (a hash) számít.
+     */
+    private function genericTokenFactory(string $returnHash = self::RETURN_TOKEN_HASH): GenericTokenFactoryInterface
     {
-        $request = new Convert($payment, 'array', $this->token());
+        $returnToken = $this->createStub(TokenInterface::class);
+        $returnToken->method('getHash')->willReturn($returnHash);
 
-        new ConvertPaymentAction($this->urlGenerator())->execute($request);
+        $factory = $this->createStub(GenericTokenFactoryInterface::class);
+        $factory->method('createToken')->willReturn($returnToken);
+
+        return $factory;
+    }
+
+    /** @return array<string, mixed> */
+    private function convert(PaymentInterface $payment, ?GenericTokenFactoryInterface $genericTokenFactory = null): array
+    {
+        $action = new ConvertPaymentAction($this->urlGenerator());
+        $action->setGenericTokenFactory($genericTokenFactory ?? $this->genericTokenFactory());
+
+        $request = new Convert($payment, 'array', $this->token());
+        $action->execute($request);
 
         return $this->typedArray($request->getResult());
     }
@@ -192,7 +225,12 @@ final class ConvertPaymentActionTest extends TestCase
         self::assertStringContainsString('e=fail', $startData->urls->fail);
         self::assertStringContainsString('e=cancel', $startData->urls->cancel);
         self::assertStringContainsString('e=timeout', $startData->urls->timeout);
-        self::assertStringContainsString(self::TOKEN_HASH, $startData->urls->success);
+        // A mintázott, DEDIKÁLT visszatérési token hash-e szerepel a
+        // címekben — NEM a capture tokené (lásd R25: a capture token
+        // `targetUrl`-je `/payment/capture/{hash}`, a visszatérés viszont a
+        // plugin saját route-jára megy, ezért saját tokent kap).
+        self::assertStringContainsString(self::RETURN_TOKEN_HASH, $startData->urls->success);
+        self::assertStringNotContainsString(self::TOKEN_HASH, $startData->urls->success);
     }
 
     public function testANullTokenIsLoudNotARawError(): void
@@ -207,19 +245,50 @@ final class ConvertPaymentActionTest extends TestCase
 
         $request = new Convert($this->payment(), 'array', null);
 
-        new ConvertPaymentAction($this->urlGenerator())->execute($request);
+        $action = new ConvertPaymentAction($this->urlGenerator());
+        $action->setGenericTokenFactory($this->genericTokenFactory());
+        $action->execute($request);
     }
 
-    public function testAnEmptyTokenHashIsLoud(): void
+    public function testAnEmptyMintedReturnTokenHashIsLoud(): void
     {
-        $token = $this->createStub(TokenInterface::class);
-        $token->method('getHash')->willReturn('');
-
+        // A capture token hash-e itt már lényegtelen — a visszatérési
+        // URL-ek a MINTÁZOTT tokentől kapják a hash-üket (R25). Ha a
+        // `GenericTokenFactory` üres hash-sel tér vissza, azt kell hangosan
+        // jeleznünk, nem a capture tokenét.
         $this->expectException(IncompletePaymentException::class);
 
-        $request = new Convert($this->payment(), 'array', $token);
+        $this->convert($this->payment(), $this->genericTokenFactory(''));
+    }
 
-        new ConvertPaymentAction($this->urlGenerator())->execute($request);
+    public function testAMissingGenericTokenFactoryIsLoud(): void
+    {
+        // A Payum minden gateway-t a `GenericTokenFactoryExtension`-nel épít
+        // fel, ami ezt automatikusan beinjektálja — ha mégis hiányzik, az
+        // programozási hiba, és annak is kell tűnnie, nem egy nyers
+        // `Error`-nak a `null` metódushíváson.
+        $this->expectException(MissingGenericTokenFactoryException::class);
+
+        $action = new ConvertPaymentAction($this->urlGenerator());
+
+        $action->execute(new Convert($this->payment(), 'array', $this->token()));
+    }
+
+    public function testItAsksTheGenericTokenFactoryForATokenTargetingTheReturnRouteWithTheCapturesGatewayAndAfterUrl(): void
+    {
+        // R25 hard-követelménye: a mintázott token ugyanarra a gateway-re és
+        // ugyanarra az `afterUrl`-re mutasson, mint a capture token — így a
+        // végső átirányítás a Sylius szokásos köszönő/hibaoldalára visz.
+        $returnToken = $this->createStub(TokenInterface::class);
+        $returnToken->method('getHash')->willReturn(self::RETURN_TOKEN_HASH);
+
+        $factory = $this->createMock(GenericTokenFactoryInterface::class);
+        $factory->expects(self::once())
+            ->method('createToken')
+            ->with('simplepay', self::isInstanceOf(PaymentInterface::class), ConvertPaymentAction::RETURN_ROUTE, [], self::CAPTURE_AFTER_URL)
+            ->willReturn($returnToken);
+
+        $this->convert($this->payment(), $factory);
     }
 
     public function testTheAttemptStartsAtOneForAFreshPayment(): void

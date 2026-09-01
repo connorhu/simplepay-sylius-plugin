@@ -35,6 +35,7 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         ?\Throwable $syncThrows = null,
         ?EntityManagerInterface $entityManager = null,
         ?LoggerInterface $logger = null,
+        ?\Throwable $getGatewayThrows = null,
     ): PaymentAlreadySettledListener {
         $token = $this->createStub(TokenInterface::class);
         $token->method('getAfterUrl')->willReturn(self::AFTER_URL);
@@ -58,7 +59,12 @@ final class PaymentAlreadySettledListenerTest extends TestCase
 
         $payum = $this->createStub(Payum::class);
         $payum->method('getHttpRequestVerifier')->willReturn($verifier);
-        $payum->method('getGateway')->willReturn($gateway);
+
+        if (null !== $getGatewayThrows) {
+            $payum->method('getGateway')->willThrowException($getGatewayThrows);
+        } else {
+            $payum->method('getGateway')->willReturn($gateway);
+        }
 
         return new PaymentAlreadySettledListener(
             $payum,
@@ -244,6 +250,40 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         $event = $this->event($this->settled());
 
         $this->listener($executed, syncThrows: new \RuntimeException('hálózati hiba'), logger: $logger)($event);
+    }
+
+    public function testAnUnresolvableGatewayNameNeverEscapesTheListener(): void
+    {
+        // R28 (4. találat): a `payum->getGateway()` korábban a try-on
+        // KÍVÜL állt — egy fel nem oldható gateway név ilyenkor kiszökött
+        // volna EBBŐL A `kernel.exception` FIGYELŐBŐL, ami a legrosszabb
+        // hely egy kivételnek. Ez a teszt azt bizonyítja, hogy a hívás a
+        // try-on BELÜLRE került: a kivétel itt elnyelődik, naplózódik, és
+        // a vevő mégis az `afterUrl`-re kerül — ugyanaz a lágy leépülés,
+        // mint egy sikertelen `Sync`-nél.
+        $executed = [];
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.capture.already_settled_sync_failed' === ($context['event'] ?? null),
+                ),
+            );
+
+        $event = $this->event($this->settled());
+
+        $this->listener(
+            $executed,
+            logger: $logger,
+            getGatewayThrows: new \Payum\Core\Exception\LogicException('ismeretlen gateway'),
+        )($event);
+
+        $response = $event->getResponse();
+        self::assertInstanceOf(RedirectResponse::class, $response);
+        self::assertSame(self::AFTER_URL, $response->getTargetUrl());
+        self::assertSame([], $executed, 'A gateway feloldása előtt egyetlen Payum kérés sem futhatott.');
     }
 
     public function testItLogsWhenNoTokenCanBeResolved(): void

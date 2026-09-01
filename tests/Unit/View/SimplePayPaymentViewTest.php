@@ -104,6 +104,32 @@ final class SimplePayPaymentViewTest extends TestCase
         self::assertNull(SimplePayPaymentView::forPayment($this->payment(self::state(), 'offline')));
     }
 
+    public function testAnIncompleteOldShapeGatewayConfigDegradesToNoViewInsteadOfThrowing(): void
+    {
+        // R27 (3. találat): `isSimplePay()` csak a `factoryName`-et nézi,
+        // de a `GatewayConfigReader::read()` a `merchant`/`environment`/
+        // `currency` mezőket is megköveteli. Egy RÉGI konfig-alakú
+        // fizetési mód (amit ez az ág migráció nélkül hagyott hátra) itt
+        // korábban `GatewayMismatchException`-t dobott volna, ELVISZVE
+        // MAGÁVAL AZ ADMIN RENDELÉS-OLDALT — ez a teszt azt bizonyítja,
+        // hogy most csendben, `null`-lal degradál.
+        $gatewayConfig = $this->createStub(GatewayConfigInterface::class);
+        $gatewayConfig->method('getFactoryName')->willReturn('simplepay');
+        $gatewayConfig->method('getConfig')->willReturn([
+            'sandbox' => true,
+        ]);
+
+        $method = $this->createStub(PaymentMethodInterface::class);
+        $method->method('getGatewayConfig')->willReturn($gatewayConfig);
+        $method->method('getCode')->willReturn('simplepay');
+
+        $payment = $this->createStub(PaymentInterface::class);
+        $payment->method('getMethod')->willReturn($method);
+        $payment->method('getDetails')->willReturn(self::state());
+
+        self::assertNull(SimplePayPaymentView::forPayment($payment));
+    }
+
     public function testAPaymentWithoutStateStillProducesAViewWithEmptyFields(): void
     {
         $view = SimplePayPaymentView::forPayment($this->payment([]));
