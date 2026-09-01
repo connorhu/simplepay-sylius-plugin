@@ -58,11 +58,15 @@ final class IpnControllerTest extends TestCase
      * keresztellenőrzés elutasítaná, és a fizetés csendben az „ismeretlen
      * rendelés" ágra esne — pont azt az esetet nem tesztelnénk, aminek a
      * nevében szerepel.
+     *
+     * Az `$orderNumber` paraméterezhető: a keresztellenőrzés ELUTASÍTÓ
+     * ágának teszteléséhez szándékosan EL KELL térnie a `BODY` orderRef-jének
+     * rendelésszám-részétől.
      */
-    private function knownPayment(): PaymentInterface
+    private function knownPayment(string $orderNumber = self::ORDER_NUMBER): PaymentInterface
     {
         $order = $this->createStub(OrderInterface::class);
-        $order->method('getNumber')->willReturn(self::ORDER_NUMBER);
+        $order->method('getNumber')->willReturn($orderNumber);
 
         $payment = $this->createStub(PaymentInterface::class);
         $payment->method('getOrder')->willReturn($order);
@@ -109,7 +113,15 @@ final class IpnControllerTest extends TestCase
         return $gateway;
     }
 
-    /** @param list<object> $executed */
+    /**
+     * @param list<object> $executed
+     *
+     * A `$trackPaymentLookup=true` a `paymentRepository->find()` hívást is
+     * naplózza az `$executed`-be egy `PaymentLookupProbe`-ként — ez teszi
+     * mérhetővé, hogy a keresés a resolve ELŐTT vagy UTÁN történt-e.
+     * Alapból kikapcsolva marad, hogy a többi teszt `$executed` naplója
+     * ne változzon: azoknak csak a gateway-hívások sorrendje számít.
+     */
     private function controller(
         array &$executed,
         ?PaymentMethodInterface $paymentMethod,
@@ -118,6 +130,7 @@ final class IpnControllerTest extends TestCase
         ?EntityManagerInterface $entityManager = null,
         string $code = 'simplepay',
         string $orderRef = 'EZ-2026-0042-17-1',
+        bool $trackPaymentLookup = false,
     ): IpnController {
         $paymentMethodRepository = $this->createMock(PaymentMethodRepositoryInterface::class);
         $paymentMethodRepository->expects(self::once())
@@ -126,7 +139,18 @@ final class IpnControllerTest extends TestCase
             ->willReturn($paymentMethod);
 
         $paymentRepository = $this->createStub(PaymentRepositoryInterface::class);
-        $paymentRepository->method('find')->willReturn($payment);
+
+        if ($trackPaymentLookup) {
+            $paymentRepository->method('find')->willReturnCallback(
+                static function (mixed $id) use (&$executed, $payment): ?PaymentInterface {
+                    $executed[] = new PaymentLookupProbe($id);
+
+                    return $payment;
+                },
+            );
+        } else {
+            $paymentRepository->method('find')->willReturn($payment);
+        }
 
         $payum = $this->createStub(Payum::class);
         $payum->method('getGateway')->willReturn($this->gateway($executed, $resolveThrows, $orderRef));
@@ -172,15 +196,39 @@ final class IpnControllerTest extends TestCase
 
     public function testItResolvesBeforeItLooksUpThePaymentSoItNeverTrustsAnUnverifiedBody(): void
     {
+        // A törzsben (a HTTP kérés tartalmában) egy MEGBÍZHATATLAN orderRef
+        // szerepel — más paymentId-vel (9999), mint amit a resolve UTÁN a
+        // hitelesített `IpnMessage` ad (17). Ha a controller a törzsből
+        // olvasná ki az orderRef-et MÉG A RESOLVE ELŐTT, a payment repository
+        // hívása vagy megelőzné a `ResolveSimplePayIpn`-t a naplóban, vagy
+        // a 9999-es (hamis) azonosítóval történne — mindkettőt elkapja ez
+        // a teszt.
         $executed = [];
 
-        $this->controller($executed, $this->paymentMethod(), $this->knownPayment())(
-            $this->request(),
-            'simplepay',
+        $spoofedRequest = Request::create(
+            '/payment/simplepay/ipn/simplepay',
+            'POST',
+            server: ['HTTP_SIGNATURE' => 'aláírás'],
+            content: '{"orderRef":"TAMADO-9999-1","status":"FINISHED"}',
         );
 
+        $this->controller(
+            $executed,
+            $this->paymentMethod(),
+            $this->knownPayment(),
+            trackPaymentLookup: true,
+        )($spoofedRequest, 'simplepay');
+
+        self::assertCount(3, $executed);
         self::assertInstanceOf(ResolveSimplePayIpn::class, $executed[0]);
-        self::assertInstanceOf(Notify::class, $executed[1]);
+        self::assertInstanceOf(PaymentLookupProbe::class, $executed[1]);
+        self::assertSame(
+            17,
+            $executed[1]->paymentId,
+            'A keresésnek a HITELESÍTETT üzenet orderRef-jéből származó paymentId-t kell '
+            . 'használnia, nem a törzsben lévőt.',
+        );
+        self::assertInstanceOf(Notify::class, $executed[2]);
     }
 
     public function testAnUnknownPaymentMethodCodeIsANotFound(): void
@@ -248,6 +296,37 @@ final class IpnControllerTest extends TestCase
             PaymentInterface::class,
             $executed[1]->getModel(),
             'Ismeretlen rendelésnél a Notify modellje nem lehet a Sylius Payment.',
+        );
+    }
+
+    public function testAMismatchedOrderNumberIsTreatedAsAnUnknownOrderSoAStrangersOrderCannotBeTouched(): void
+    {
+        // A `findPayment()` keresztellenőrzése: a hivatkozás rendelésszáma
+        // egyezzen a megtalált `Payment` rendelésével. Ha a megtalált
+        // `Payment` MÁSIK rendeléshez tartozik (elgépelt vagy átfedő
+        // paymentId), a fizetést el kell utasítani — ez az ismeretlen
+        // rendelés ágára esik: aláírt 200, de `flush()` nélkül, mert idegen
+        // rendelést sosem szabad módosítani.
+        $executed = [];
+        $mismatchedPayment = $this->knownPayment('MASIK-RENDELES-0099');
+
+        $entityManager = $this->createMock(EntityManagerInterface::class);
+        $entityManager->expects(self::never())->method('flush');
+
+        $response = $this->controller(
+            $executed,
+            $this->paymentMethod(),
+            $mismatchedPayment,
+            entityManager: $entityManager,
+        )($this->request(), 'simplepay');
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertCount(2, $executed, 'Rendelésszám-eltérésnél is lefut a Notify, eldobható modellel.');
+        self::assertInstanceOf(Notify::class, $executed[1]);
+        self::assertNotInstanceOf(
+            PaymentInterface::class,
+            $executed[1]->getModel(),
+            'Rendelésszám-eltérésnél a Notify modellje nem lehet a Sylius Payment.',
         );
     }
 
