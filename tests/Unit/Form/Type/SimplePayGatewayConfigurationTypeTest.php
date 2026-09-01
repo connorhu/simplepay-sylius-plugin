@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodeConjure\SyliusSimplePayPlugin\Tests\Unit\Form\Type;
 
 use CodeConjure\SyliusSimplePayPlugin\Form\Type\SimplePayGatewayConfigurationType;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\Form\Extension\Validator\ValidatorExtension;
 use Symfony\Component\Form\FormInterface;
 use Symfony\Component\Form\Test\TypeTestCase;
@@ -12,6 +13,16 @@ use Symfony\Component\Validator\Validation;
 
 final class SimplePayGatewayConfigurationTypeTest extends TypeTestCase
 {
+    protected function setUp(): void
+    {
+        // A TypeTestCase::setUp() csak akkor mockolja a dispatchert, ha még
+        // nincs beállítva — itt egy elvárás nélküli stub-bal előzzük meg,
+        // hogy a PHPUnit ne jelezzen "no expectations configured" notice-t.
+        $this->dispatcher = $this->createStub(EventDispatcherInterface::class);
+
+        parent::setUp();
+    }
+
     /** @return list<\Symfony\Component\Form\FormExtensionInterface> */
     protected function getExtensions(): array
     {
