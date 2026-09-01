@@ -1,0 +1,31 @@
+{# A SimplePay gateway admin konfigurációs sablonja. #}
+{% set configuration = hookable_metadata.context.form.gatewayConfig.config %}
+{% set payment_method_code = hookable_metadata.context.form.vars.value.code|default(null) %}
+
+<div class="row">
+    <div class="col-12 col-md-6">
+        {{ form_row(configuration.merchant) }}
+    </div>
+    <div class="col-12 col-md-6">
+        {{ form_row(configuration.secretKey) }}
+    </div>
+    <div class="col-12 col-md-6">
+        {{ form_row(configuration.currency) }}
+    </div>
+    <div class="col-12 col-md-6">
+        {{ form_row(configuration.environment) }}
+    </div>
+
+    <div class="col-12">
+        <div class="alert alert-info" role="alert">
+            <h6 class="alert-heading">{{ 'codeconjure_simplepay.ipn.heading'|trans }}</h6>
+
+            {% if payment_method_code %}
+                <p class="mb-2">{{ 'codeconjure_simplepay.ipn.instructions'|trans }}</p>
+                <code class="user-select-all">{{ url('codeconjure_simplepay_ipn', {'code': payment_method_code}) }}</code>
+            {% else %}
+                <p class="mb-0">{{ 'codeconjure_simplepay.ipn.after_save'|trans }}</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
