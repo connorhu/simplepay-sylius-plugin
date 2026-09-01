@@ -64,4 +64,15 @@ final class LocaleToLanguageMapTest extends TestCase
 
         LocaleToLanguageMap::resolve('');
     }
+
+    public function testAWhitespaceOnlyLocaleIsLoud(): void
+    {
+        // Nem csak az üres string üres — a trim() utáni üres eredmény is az.
+        // Ha ez az ág csendben átcsúszna a leképezésen, egy hibásan összeállt
+        // locale (pl. sablonhiba miatt szóközökkel) csendben magyar
+        // fizetőoldalt eredményezne, nem hangos hibát.
+        $this->expectException(IncompletePaymentException::class);
+
+        LocaleToLanguageMap::resolve('   ');
+    }
 }
