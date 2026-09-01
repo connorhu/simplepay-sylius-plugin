@@ -50,7 +50,7 @@
             <argument type="service" id="sylius.repository.payment"/>
             <argument type="service" id="payum"/>
             <argument type="service" id="doctrine.orm.entity_manager"/>
-            <argument type="service" id="payum.reply_to_symfony_response_converter"/>
+            <argument type="service" id="payum.converter.reply_to_http_response"/>
             <argument type="service" id="logger" on-invalid="null"/>
             <tag name="monolog.logger" channel="simplepay"/>
         </service>

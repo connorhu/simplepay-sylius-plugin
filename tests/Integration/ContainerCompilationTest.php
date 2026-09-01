@@ -26,6 +26,33 @@ use Symfony\Component\Routing\RouterInterface;
  * lefordítja a konténert és példányosít: itt bukik ki az a fajta hiba, ami a
  * Payum-csomagban a bundle bootolását akadályozta meg — a `services.xml`
  * `on-invalid="null"`-t ígért, a konstruktor nem-nullable-t követelt.
+ *
+ * FONTOS KORLÁT, amit érdemes fejben tartani, mielőtt ehhez a teszthez új
+ * külső függőséget adnánk a `services.xml`-ben:
+ *
+ * Ez a teszt bizonyítja, hogy
+ *   1. a PLUGIN SAJÁT szolgáltatásai — a `services.xml`-ben deklarált
+ *      definíciók és a mögöttük álló konstruktorok — együtt fordíthatók és
+ *      példányosíthatók, a nullable logger szerződést is beleértve.
+ *
+ * Ez a teszt NEM tudja bizonyítani, hogy
+ *   2. a `services.xml` által hivatkozott KÜLSŐ (Sylius/Payum) szolgáltatás-
+ *      azonosítók valóban léteznek egy éles alkalmazásban — mert ez a teszt
+ *      maga deklarálja őket szintetikusként, az `EXTERNAL_SERVICES` tömb
+ *      alapján. Ha a `services.xml` egy külső azonosítót elgépel, a teszt
+ *      által épített konténer attól még sikeresen fordul: a hibás
+ *      azonosítót ugyanez a teszt regisztrálja be, amit épp ellenőrizni
+ *      próbál — a hiba emiatt SZERKEZETILEG láthatatlan innen, nem
+ *      hanyagságból marad ki.
+ *
+ * A 2. pontot ELLENŐRZŐ kapu a plugint befogadó alkalmazásban fut:
+ * `bin/console lint:container` a valódi Sylius/Payum konténer ellen
+ * validál, és pontosan egy ilyen hibát fogott meg (a `services.xml` egy
+ * nem létező `payum.reply_to_symfony_response_converter` azonosítót
+ * hivatkozott a valódi `payum.converter.reply_to_http_response` helyett).
+ * A plugin szándékosan nem szállít Sylius teszt-kernelt (lásd a README-t),
+ * ezért ez a teszt-szuit nem tudja és nem is akarja kiváltani a befogadó
+ * alkalmazás `lint:container` futtatását.
  */
 final class ContainerCompilationTest extends TestCase
 {
@@ -39,7 +66,7 @@ final class ContainerCompilationTest extends TestCase
         'router' => RouterInterface::class,
         'payum' => Payum::class,
         'doctrine.orm.entity_manager' => EntityManagerInterface::class,
-        'payum.reply_to_symfony_response_converter' => ReplyToSymfonyResponseConverter::class,
+        'payum.converter.reply_to_http_response' => ReplyToSymfonyResponseConverter::class,
         'sylius.repository.payment_method' => PaymentMethodRepositoryInterface::class,
         'sylius.repository.payment' => PaymentRepositoryInterface::class,
         'sylius.repository.order' => OrderRepositoryInterface::class,
