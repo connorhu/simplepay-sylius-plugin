@@ -6,6 +6,7 @@ namespace CodeConjure\SyliusSimplePayPlugin\Tests\Unit\Command;
 
 use CodeConjure\SimplePay\Exception\TransportException;
 use CodeConjure\SimplePayPayum\Details;
+use CodeConjure\SimplePayPayum\Exception\MissingDetailsException;
 use CodeConjure\SyliusSimplePayPlugin\Command\RefundCommand;
 use CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient;
 use Doctrine\Common\Collections\ArrayCollection;
@@ -258,6 +259,16 @@ final class RefundCommandTest extends TestCase
         self::assertSame([], $executed);
     }
 
+    /**
+     * FONTOS, MIT PINEL EZ A TESZT: a parancs KÜLSŐ szerződését — hogy egy
+     * másik gateway-en futó fizetéssel a parancs elutasít és nem dispatchol.
+     * NEM a `findRefundablePayment()` szűrőjét önmagában: ha az a szűrő
+     * teljesen kiesne, ez a teszt akkor is zöld maradna, mert a
+     * `GatewayConfigReader::read()` a `factoryName` eltérését lejjebb,
+     * függetlenül is elutasítja (védelem több rétegben). A produkciós
+     * viselkedés mindkét esetben helyes; ez a teszt csak nem bizonyítja,
+     * melyik réteg fogta meg.
+     */
     public function testAPaymentOnAnotherGatewayFails(): void
     {
         $executed = [];
@@ -294,6 +305,68 @@ final class RefundCommandTest extends TestCase
 
         self::assertSame(1, $exitCode);
         self::assertSame([], $executed);
+    }
+
+    public function testANegativeAmountIsRejectedRatherThanSentToSimplePay(): void
+    {
+        $executed = [];
+        $this->details = [Details::STATE_KEY => ['transactionId' => 'T1', 'status' => 'FINISHED']];
+
+        $entityManager = $this->createMock(EntityManagerInterface::class);
+        $entityManager->expects(self::never())->method('flush');
+
+        $tester = $this->tester($executed, $this->payment(), entityManager: $entityManager);
+        $exitCode = $tester->execute(['orderNumber' => 'EZ-2026-0042', '--amount' => '-50000']);
+
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('-50000', $tester->getDisplay());
+        self::assertSame([], $executed);
+    }
+
+    public function testAZeroAmountIsRejectedRatherThanSentToSimplePay(): void
+    {
+        $executed = [];
+        $this->details = [Details::STATE_KEY => ['transactionId' => 'T1', 'status' => 'FINISHED']];
+
+        $entityManager = $this->createMock(EntityManagerInterface::class);
+        $entityManager->expects(self::never())->method('flush');
+
+        $tester = $this->tester($executed, $this->payment(), entityManager: $entityManager);
+        $exitCode = $tester->execute(['orderNumber' => 'EZ-2026-0042', '--amount' => '0']);
+
+        self::assertSame(1, $exitCode);
+        self::assertSame([], $executed);
+    }
+
+    /**
+     * A `RefundAction::execute()` a 2. rétegben `MissingDetailsException`-t
+     * dobhat (pl. `startData()`-n keresztül, ha `simplepay_request` sosem
+     * íródott be — elérhető, ha egy fizetés kézzel, admin migrációval kerül
+     * "completed" állapotba). Ez az osztály `\LogicException`-ből származik,
+     * SEM a `SyliusSimplePayException`, SEM a `SimplePayException` marker-
+     * interfészt nem implementálja — csak a `SimplePayPayumException`-t.
+     * E teszt nélkül egy ilyen hiba kiszökne a catch alól, és az operátor
+     * Symfony nyers hibakiírását kapná a kecses magyar üzenet helyett.
+     */
+    public function testAMissingDetailsExceptionFromLayerTwoProducesTheGracefulErrorPath(): void
+    {
+        $executed = [];
+        $this->details = [Details::STATE_KEY => ['transactionId' => 'T1', 'status' => 'FINISHED']];
+
+        $entityManager = $this->createMock(EntityManagerInterface::class);
+        $entityManager->expects(self::never())->method('flush');
+
+        $tester = $this->tester(
+            $executed,
+            $this->payment(),
+            entityManager: $entityManager,
+            refundThrows: new MissingDetailsException('hiányzó "simplepay_request" névtér'),
+        );
+        $exitCode = $tester->execute(['orderNumber' => 'EZ-2026-0042']);
+
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('simplepay_request', $tester->getDisplay());
+        self::assertCount(1, $executed);
     }
 
     public function testAFailedGatewayCallReturnsFailureAndDoesNotFlush(): void

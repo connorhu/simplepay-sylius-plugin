@@ -114,6 +114,19 @@ final class RefundCommand extends Command
             $io->note('A nyers HTTP forgalom rögzítése bekapcsolva.');
         }
 
+        // Az --amount feldolgozása KÜLÖN, saját hibaágon fut: ez tisztán a
+        // parancssori bemenet ellenőrzése, nem a SimplePay-protokoll hibája,
+        // tehát nem tartozik a lenti, domain-kivételekre szabott catch alá.
+        // Enélkül egy negatív vagy nulla --amount kiszökne a try/catch alól,
+        // és Symfony nyers hibakiírását adná a kecses magyar üzenet helyett.
+        try {
+            $syliusAmount = $this->syliusAmount($input, $payment);
+        } catch (\InvalidArgumentException $exception) {
+            $io->error($exception->getMessage());
+
+            return Command::FAILURE;
+        }
+
         try {
             $method = $payment->getMethod() ?? throw new \LogicException(
                 'A jóváírható fizetéshez tartoznia kell fizetési módnak.',
@@ -131,7 +144,6 @@ final class RefundCommand extends Command
                 'A SimplePay gateway konfigurációjából hiányzik a Payum gateway neve.',
             );
 
-            $syliusAmount = $this->syliusAmount($input, $payment);
             $minorUnits = SyliusAmountConverter::toMinorUnits($syliusAmount, $settings->currency);
 
             $details = $payment->getDetails();
@@ -148,7 +160,11 @@ final class RefundCommand extends Command
             $this->payum->getGateway($gatewayName)->execute(new Refund($payment));
 
             $this->entityManager->flush();
-        } catch (SyliusSimplePayException | \CodeConjure\SimplePay\Exception\SimplePayException $exception) {
+        } catch (
+            SyliusSimplePayException
+            | \CodeConjure\SimplePay\Exception\SimplePayException
+            | \CodeConjure\SimplePayPayum\Exception\SimplePayPayumException $exception
+        ) {
             $io->error($exception->getMessage());
 
             return Command::FAILURE;
@@ -204,13 +220,26 @@ final class RefundCommand extends Command
             );
         }
 
-        if (!is_string($option) || 1 !== preg_match('/^-?\d+$/', $option)) {
-            throw new \InvalidArgumentException(
-                'Az --amount értéke egész szám kell legyen, Sylius-egységben (1/100).',
-            );
+        if (!is_string($option) || 1 !== preg_match('/^\d+$/', $option)) {
+            throw new \InvalidArgumentException(sprintf(
+                'Az --amount értéke pozitív egész szám kell legyen, Sylius-egységben (1/100). Kapott érték: "%s".',
+                is_string($option) ? $option : gettype($option),
+            ));
         }
 
-        return (int) $option;
+        $amount = (int) $option;
+
+        // Jóváírás összege sosem lehet nulla vagy negatív — egy ilyen kérés a
+        // valódi SimplePay API-nak menne ki, jel nélküli ellenőrzés nélkül
+        // (`Money::fromMinorUnits()` a 2. rétegben nem validál előjelet).
+        if ($amount <= 0) {
+            throw new \InvalidArgumentException(sprintf(
+                'Az --amount értéke pozitív egész szám kell legyen, Sylius-egységben (1/100). Kapott érték: "%d".',
+                $amount,
+            ));
+        }
+
+        return $amount;
     }
 
     /**
