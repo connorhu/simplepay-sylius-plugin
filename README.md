@@ -25,8 +25,14 @@ CodeConjure\SyliusSimplePayPlugin\CodeConjureSyliusSimplePayPlugin::class => ['a
 
 ```yaml
 codeconjure_simplepay:
-    resource: '@CodeConjureSyliusSimplePayPlugin/Resources/config/routing.yaml'
+    resource: '@CodeConjureSyliusSimplePayPlugin/src/Resources/config/routing.yaml'
 ```
+
+> A bundle `getPath()`-ja a csomag gyökerét adja vissza, a `Resources/`
+> mappa pedig a `src/` alatt van — az útvonal-erőforrás importjában emiatt
+> kell a `src/` szegmens. Mérve: `Kernel::locateResource()` a `Resources/`
+> szegmenssel `Unable to find file` hibával elszáll, a `src/Resources/`
+> szegmenssel viszont megtalálja a fájlt.
 
 > **A plugin útvonalait a shop locale-prefixén KÍVÜL kell importálni.** Az
 > IPN-cím a SimplePay vezérlőpanelbe kerül, ahol egy `/{_locale}` szegmens
