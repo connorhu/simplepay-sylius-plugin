@@ -1,0 +1,36 @@
+name: CI
+
+on:
+    push: ~
+    pull_request: ~
+    workflow_dispatch: ~
+
+permissions:
+    contents: read
+
+jobs:
+    checks:
+        name: "Tesztek és statikus ellenőrzés (PHP ${{ matrix.php }})"
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ['8.4']
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: shivammathur/setup-php@v2
+              with:
+                  php-version: ${{ matrix.php }}
+                  coverage: none
+
+            - uses: ramsey/composer-install@v3
+
+            - name: Unit tesztek
+              run: vendor/bin/phpunit
+
+            - name: PHPStan
+              run: vendor/bin/phpstan analyse -c phpstan.dist.neon --no-progress
+
+            - name: ECS
+              run: vendor/bin/ecs check --no-progress-bar
