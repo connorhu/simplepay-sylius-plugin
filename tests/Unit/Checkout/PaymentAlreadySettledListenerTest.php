@@ -14,6 +14,7 @@ use Payum\Core\Request\Sync;
 use Payum\Core\Security\HttpRequestVerifierInterface;
 use Payum\Core\Security\TokenInterface;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -33,6 +34,7 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         ?HttpRequestVerifierInterface $verifier = null,
         ?\Throwable $syncThrows = null,
         ?EntityManagerInterface $entityManager = null,
+        ?LoggerInterface $logger = null,
     ): PaymentAlreadySettledListener {
         $token = $this->createStub(TokenInterface::class);
         $token->method('getAfterUrl')->willReturn(self::AFTER_URL);
@@ -61,7 +63,7 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         return new PaymentAlreadySettledListener(
             $payum,
             $entityManager ?? $this->createStub(EntityManagerInterface::class),
-            new NullLogger(),
+            $logger ?? new NullLogger(),
         );
     }
 
@@ -204,5 +206,64 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         $entityManager->expects($this->once())->method('flush');
 
         $this->listener($executed, entityManager: $entityManager)($this->event($this->settled()));
+    }
+
+    public function testItFindsTheExceptionWhenItIsNestedTwoLevelsDeep(): void
+    {
+        // Az okláncot nem csak egy szintig, hanem a végéig kell bejárni: egy
+        // olyan mutáció, ami csak egy `getPrevious()`-t old fel, ezen a
+        // teszten már elbukna, míg az eggyel beágyazott esetet még átengedné.
+        $executed = [];
+        $event = $this->event(new \RuntimeException(
+            'külső burok',
+            0,
+            new \RuntimeException('belső burok', 0, $this->settled()),
+        ));
+
+        $this->listener($executed)($event);
+
+        self::assertInstanceOf(RedirectResponse::class, $event->getResponse());
+    }
+
+    public function testItLogsTheSyncFailureEvent(): void
+    {
+        // A `catch (\Throwable)` ág önmagában nem bizonyítja, hogy a hiba
+        // naplózva is lett — a naplózás mockolt elvárás nélkül némán is
+        // eltűnhetne, miközben a vezérlésfolyam változatlan marad.
+        $executed = [];
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.capture.already_settled_sync_failed' === ($context['event'] ?? null),
+                ),
+            );
+
+        $event = $this->event($this->settled());
+
+        $this->listener($executed, syncThrows: new \RuntimeException('hálózati hiba'), logger: $logger)($event);
+    }
+
+    public function testItLogsWhenNoTokenCanBeResolved(): void
+    {
+        $executed = [];
+        $verifier = $this->createStub(HttpRequestVerifierInterface::class);
+        $verifier->method('verify')->willThrowException(new NotFoundHttpException('nincs token'));
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('warning')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.capture.already_settled_no_token' === ($context['event'] ?? null),
+                ),
+            );
+
+        $event = $this->event($this->settled());
+
+        $this->listener($executed, verifier: $verifier, logger: $logger)($event);
     }
 }
