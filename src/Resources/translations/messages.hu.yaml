@@ -1,0 +1,31 @@
+codeconjure_simplepay:
+    form:
+        merchant: 'Merchant azonosító'
+        merchant_help: 'A SimplePay kereskedői azonosító. Pénznemenként külön azonosító tartozik hozzá.'
+        secret_key: 'Titkos kulcs'
+        secret_key_help: 'Az aláíráshoz használt kulcs a kereskedői vezérlőpanelről.'
+        environment: 'Környezet'
+        currency: 'Pénznem'
+        currency_help: 'A merchant azonosítóhoz tartozó pénznem. Egy merchant egy pénznemet fogad.'
+    environment:
+        sandbox: 'Teszt (sandbox)'
+        production: 'Éles'
+    outcome:
+        applied: 'Alkalmazva'
+        duplicate: 'Ismétlődés'
+        rejected: 'Elutasítva'
+    ipn:
+        heading: 'Értesítési (IPN) cím'
+        instructions: 'Másold be ezt a címet a SimplePay kereskedői vezérlőpanelbe, a „Technikai adatok” menüpont alá. Fiókonként külön kell megadni.'
+        after_save: 'Az értesítési cím a fizetési mód mentése után jelenik meg itt, mert a kódját tartalmazza.'
+    admin:
+        heading: 'SimplePay tranzakció'
+        transaction_id: 'Tranzakcióazonosító'
+        status: 'Állapot'
+        environment: 'Környezet'
+        last_ipn: 'Utolsó értesítés'
+        ipn_log: 'Értesítési napló'
+        received_at: 'Beérkezett'
+        outcome: 'Eredmény'
+        repeat_count: 'Ismétlés'
+        repeat_warning: 'A SimplePay ismételten elküldte ugyanazt az értesítést. Ez azt jelenti, hogy a visszaigazolásunkat nem fogadta el — érdemes ellenőrizni a receiveDate időbélyeg formátumát.'
