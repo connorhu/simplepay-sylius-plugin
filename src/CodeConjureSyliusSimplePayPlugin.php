@@ -14,9 +14,4 @@ final class CodeConjureSyliusSimplePayPlugin extends Bundle
     {
         return new CodeConjureSyliusSimplePayExtension();
     }
-
-    public function getPath(): string
-    {
-        return \dirname(__DIR__);
-    }
 }
