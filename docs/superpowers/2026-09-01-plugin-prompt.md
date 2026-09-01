@@ -43,15 +43,38 @@ Nincs verzió-tagje és nincs a Packagiston — csak `dev-main`-ként oldható f
 | | |
 |---|---|
 | Hely | `/server/www/egyhazzene.hu/incubator/simplepay-payum/` |
-| Repo | https://github.com/connorhu/simplepay-payum |
-| Ág | `feat/simplepay-payum-2-fazis` — **40 commit a main fölött, NINCS PUSHOLVA** |
-| Állapot | 17/17 task kész, 179 teszt zöld, phpstan level 9 + ECS tisztán |
+| Repo | https://github.com/connorhu/simplepay-payum — `main` @ `1359030` |
+| Állapot | **kész, mergelve, pusholva, CI zöld** |
 
-> **ELSŐ TEENDŐD:** kérdezd meg a megrendelőt, hogy a `feat/simplepay-payum-2-fazis`
-> ág mergelhető-e a `main`-be és pusholható-e. A plugin `require`-je a
-> `codeconjure/simplepay-payum` csomagra hivatkozik; amíg az ág nincs a
-> `main`-en, a plugin csak **helyi path repositoryval** tud fordulni, és a CI-ja
-> bukni fog. Ez nem a te döntésed — kérdezd meg, mielőtt bármit teszel.
+17/17 task, 179 teszt, phpstan level 9 + ECS tisztán. A CI **valódi GitHub
+runneren** zöld PHP 8.4-en és 8.5-ön is — tehát a VCS-alapú függőség-feloldás
+nem elmélet, hanem mért tény.
+
+**A plugin `composer.json`-ja ugyanezt a mintát másolja.** A payum csomagé így néz ki:
+
+```json
+"require": {
+    "codeconjure/simplepay": "dev-main",
+    "codeconjure/simplepay-payum": "dev-main"
+},
+"repositories": [
+    { "type": "vcs", "url": "https://github.com/connorhu/simplepay-lib" },
+    { "type": "vcs", "url": "https://github.com/connorhu/simplepay-payum" }
+],
+"minimum-stability": "dev",
+"prefer-stable": true
+```
+
+Egyik csomag sincs a Packagiston, és egyiknek sincs verzió-tagje — ezért `dev-main`.
+Ha időközben tagelve lettek vagy felkerültek a Packagistra, a `repositories` blokk
+elhagyható és a kikötés `^1.0` lehet; ezt **ellenőrizd**, ne feltételezd.
+
+**Path repository a commitolt `composer.json`-ba nem kerülhet** — az csak egy gépen
+működik, és a CI-t némán elrontja. Helyi fejlesztéshez a fájlon kívül adható meg:
+```bash
+composer config repositories.simplepay-payum path ../simplepay-payum
+composer config --unset repositories.simplepay-payum   # commit előtt
+```
 
 ---
 
@@ -305,6 +328,36 @@ mielőtt bármit indítasz, és ne feltételezz jóváhagyást korábbi üzenete
   nélkül.**
 - **Ne hagyj path repositoryt a commitolt `composer.json`-ban** — az csak egy gépen
   működik, és a CI-t némán elrontja.
+- **Ne vedd ki a `.github/workflows/ci.yaml`-t a commitból, ha a push elakad rajta.**
+  Az csendben megváltoztatná, amit szállítunk. Lásd lent a megoldást.
+
+---
+
+## Egy buktató a pushnál, amit már megfizettünk
+
+A payum csomag pusholása **elsőre elakadt**, nem a kódon:
+
+```
+refusing to allow an OAuth App to create or update workflow
+`.github/workflows/ci.yaml` without `workflow` scope
+```
+
+A `gh` OAuth token hatókörei `repo`, `read:org`, `gist`, `admin:public_key` —
+**`workflow` nincs köztük**, márpedig a Task 1 létrehozza a CI workflow fájlt.
+A payum repo `https` remote-tal volt beállítva, tehát a push az OAuth tokenen ment.
+
+**A plugin repo remote-ja már SSH** (`git@github.com:connorhu/simplepay-sylius-plugin.git`),
+mert a `gh repo create --source=.` így állította be — tehát **ez a hiba itt
+várhatóan nem jön elő**. Ha mégis (pl. valaki újraklónozza https-sel), a megoldás
+a remote SSH-ra állítása:
+
+```bash
+git remote set-url origin git@github.com:connorhu/simplepay-sylius-plugin.git
+```
+
+Az SSH nem az OAuth tokenen hitelesít, tehát a korlát nem érvényes rá. A tartós
+megoldás a megrendelő oldalán a `gh auth refresh -h github.com -s workflow`, de az
+böngészős, tehát **nem a te dolgod** — ha odáig jutsz, szólj neki.
 
 ---
 
