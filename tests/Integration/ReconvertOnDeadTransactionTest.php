@@ -4,17 +4,30 @@ declare(strict_types=1);
 
 namespace CodeConjure\SyliusSimplePayPlugin\Tests\Integration;
 
+use CodeConjure\SimplePay\Client;
+use CodeConjure\SimplePay\Config;
+use CodeConjure\SimplePay\Currency;
+use CodeConjure\SimplePay\Environment;
 use CodeConjure\SimplePay\TransactionStatus;
+use CodeConjure\SimplePayPayum\Action\CaptureAction as SimplePayCaptureAction;
 use CodeConjure\SimplePayPayum\Action\StatusAction;
+use CodeConjure\SimplePayPayum\Api;
 use CodeConjure\SimplePayPayum\Details;
+use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
 use CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction;
 use CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension;
-use Payum\Core\Action\ActionInterface;
+use Http\Mock\Client as MockHttpClient;
+use Nyholm\Psr7\Factory\Psr17Factory;
+use Nyholm\Psr7\Response;
 use Payum\Core\Gateway;
+use Payum\Core\Reply\HttpRedirect;
 use Payum\Core\Request\Capture;
+use Payum\Core\Request\Convert;
 use Payum\Core\Security\GenericTokenFactoryInterface;
 use Payum\Core\Security\TokenInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\ResponseInterface;
 use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
 use Sylius\Bundle\PayumBundle\Action\ExecuteSameRequestWithPaymentDetailsAction;
 use Sylius\Bundle\PayumBundle\Provider\PaymentDescriptionProviderInterface;
@@ -27,110 +40,160 @@ use Sylius\Component\Payment\Model\PaymentMethodInterface;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 
 /**
- * R26 (2. találat) bizonyítéka: a VALÓDI
+ * R26/R32 (2. találat) bizonyítéka: a VALÓDI
  * `Sylius\Bundle\PayumBundle\Action\CapturePaymentAction`-t hajtjuk végre —
  * ugyanúgy, ahogy az átvizsgáló tette —, egy „felvevő" (recording) Payum
- * `Gateway`-jel, ami minden `execute()`-hívás típusát naplózza. A frozen
- * `codeconjure/simplepay-payum` csomagból KIZÁRÓLAG a `StatusAction`-t
- * használjuk (tiszta olvasás, nincs hálózat) — a `CaptureAction`-t
- * SZÁNDÉKOSAN NEM: az egy valódi `/start` hívást indítana a SimplePay felé,
- * amit ez a feladat kifejezetten tilt. A `Capture(ArrayAccess)`-t egy néma
- * felvevő dublya "kezeli" — pont úgy, ahogy az átvizsgáló saját "recording
- * gateway"-je is csak a KÉRÉS-SOROZATOT bizonyította, nem a tényleges
- * SimplePay-hívást.
+ * `Gateway`-jel, ami minden `execute()`-hívás típusát naplózza.
  *
- * A négy forgatókönyv R26 pontos állítását fedi le:
- *   - friss fizetés (nincs simplepay_state)                → Convert fut
- *   - halott tranzakció (TIMEOUT — `isCanceled()` csoport)  → Convert ÚJRA fut
- *   - halott tranzakció (FRAUD — `isFailed()` csoport)      → Convert ÚJRA fut
- *   - élő tranzakció (INIT)                                 → Convert NEM fut
- *   - lezárt tranzakció (FINISHED)                           → Convert NEM fut
- *   - lezárt tranzakció (REFUND)                             → Convert NEM fut
+ * A frozen `codeconjure/simplepay-payum` csomagból ITT MÁR A VALÓDI
+ * `CaptureAction`-t is használjuk (nem egy néma dublyát) — R32 kifejezetten
+ * azt kéri, hogy lássuk, MEGY-e ki `/start`, és melyik `orderRef`-fel. A
+ * VALÓDI hálózati hívást egy `Http\Mock\Client` (PSR-18) helyettesíti: ez
+ * a `CodeConjure\SimplePay\Client`-en (frozen, de csak HASZNÁLT, nem
+ * MÓDOSÍTOTT) keresztül fut, tehát a `CaptureAction` teljesen valós
+ * kódúton megy végig — csak a ténylegesen kimenő HTTP-hívást fogja el egy
+ * dublya, SOHA nem éri el a hálózatot. A dublya válaszát a helyes
+ * SHA-384 aláírással látjuk el (`CodeConjure\SimplePay\Signature`
+ * algoritmusa szerint), hogy a `Client::start()` saját aláírás-
+ * ellenőrzése is átmenjen — enélkül a `CaptureAction` egy
+ * `SignatureException`-t dobna, nem azt, amit mérni akarunk.
+ *
+ * A teljes státusz-mátrixot fedjük le, minden állapotot LEJÁRT és MÉG ÉLŐ
+ * időzítéssel is:
+ *
+ *   - friss fizetés (nincs simplepay_state)                           → Convert fut, /start megy, friss orderRef
+ *   - függőben (INIT/INPAYMENT/AUTHORIZED/INFRAUD), LEJÁRT időzítéssel → Convert fut, /start megy, friss orderRef (R32 ÚJ esete)
+ *   - függőben, MÉG ÉLŐ időzítéssel                                    → Convert NEM fut, nincs /start (isLive() true)
+ *   - halott végleges (CANCELLED/TIMEOUT/NOTAUTHORIZED/FRAUD), bármely időzítéssel → Convert fut, /start megy, friss orderRef
+ *   - lezárt (FINISHED/REFUND/REVERSED), bármely időzítéssel          → Convert NEM fut, PaymentAlreadySettledException, nincs /start
+ *
+ * A "halott végleges" és "lezárt" csoportokat MINDKÉT időzítés-alakkal
+ * teszteljük, hogy bizonyítsuk: a `TransactionState::isLive()` az időzítéstől
+ * FÜGGETLENÜL `false`-t ad végleges (`isFinal()`) státuszra — ez az a hely,
+ * ahol R32 explicit figyelmeztetése szerint a javítás elromolhatott volna.
  */
 final class ReconvertOnDeadTransactionTest extends TestCase
 {
-    public function testConvertRunsForAFreshPayment(): void
-    {
-        $log = $this->capture($this->payment(stateArray: []));
+    private const string PRIOR_ORDER_REF = 'EZ-2026-0042-17-1';
 
-        self::assertContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        self::assertSame(1, $log->attemptAfter);
+    private const string SECRET_KEY = 'titok-teszt-secret';
+
+    /**
+     * @return iterable<string, array{0: ?TransactionStatus, 1: string, 2: bool, 3: bool, 4: bool}>
+     *
+     * A tömb sorrendje: [státusz vagy null, időzítés ('expired'|'live'|'n/a'),
+     * Convert fusson-e, /start menjen-e ki, PaymentAlreadySettledException legyen-e]
+     */
+    public static function matrix(): iterable
+    {
+        yield 'friss fizetés (nincs simplepay_state)' => [null, 'n/a', true, true, false];
+
+        $pending = [
+            TransactionStatus::Init,
+            TransactionStatus::InPayment,
+            TransactionStatus::Authorized,
+            TransactionStatus::InFraud,
+        ];
+
+        foreach ($pending as $status) {
+            yield sprintf('%s, LEJÁRT fizetőoldal (R32 új esete)', $status->value) => [$status, 'expired', true, true, false];
+            yield sprintf('%s, MÉG ÉLŐ fizetőoldal', $status->value) => [$status, 'live', false, false, false];
+        }
+
+        $deadFinal = [
+            TransactionStatus::Cancelled,
+            TransactionStatus::Timeout,
+            TransactionStatus::NotAuthorized,
+            TransactionStatus::Fraud,
+        ];
+
+        foreach ($deadFinal as $status) {
+            yield sprintf('%s (halott, végleges), lejárt időzítéssel', $status->value) => [$status, 'expired', true, true, false];
+            yield sprintf('%s (halott, végleges), "élőnek tűnő" időzítéssel is', $status->value) => [$status, 'live', true, true, false];
+        }
+
+        $settled = [
+            TransactionStatus::Finished,
+            TransactionStatus::Refund,
+            TransactionStatus::Reversed,
+        ];
+
+        foreach ($settled as $status) {
+            yield sprintf('%s (lezárt), lejárt időzítéssel', $status->value) => [$status, 'expired', false, false, true];
+            yield sprintf('%s (lezárt), "élőnek tűnő" időzítéssel is', $status->value) => [$status, 'live', false, false, true];
+        }
     }
 
-    public function testConvertRunsAgainAfterATimedOutTransactionDeadCanceledGroup(): void
-    {
-        $log = $this->capture($this->payment(stateArray: [
-            'status' => TransactionStatus::Timeout->value,
-            'attempt' => 1,
-            'transactionId' => 'T1',
-        ], requestArray: ['orderRef' => 'EZ-2026-0042-17-1']));
+    #[DataProvider('matrix')]
+    public function testTheFullStatusMatrixAgainstTheRealCapturePaymentAction(
+        ?TransactionStatus $status,
+        string $timeoutMode,
+        bool $expectConvert,
+        bool $expectStart,
+        bool $expectSettledException,
+    ): void {
+        $result = $this->driveCapture($status, $timeoutMode);
 
-        self::assertContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        self::assertSame(2, $log->attemptAfter);
-        self::assertNotSame('EZ-2026-0042-17-1', $log->orderRefAfter);
-        self::assertSame('EZ-2026-0042-17-2', $log->orderRefAfter);
+        self::assertSame($expectConvert, $result->convertRan, 'A Convert futása nem egyezik a várttal.');
+        self::assertSame($expectStart, $result->startRequestSent, 'A /start hívás megtörténte nem egyezik a várttal.');
+        self::assertSame(
+            $expectSettledException,
+            $result->settledExceptionThrown,
+            'A PaymentAlreadySettledException dobása nem egyezik a várttal.',
+        );
+
+        if ($expectStart) {
+            self::assertNotNull($result->orderRefSent, 'A kimenő /start-nak orderRef-et kell vinnie.');
+
+            if (null !== $status) {
+                self::assertNotSame(
+                    self::PRIOR_ORDER_REF,
+                    $result->orderRefSent,
+                    'A friss /start-nak ÚJ orderRef-fel kell mennie — a régi felhasználása pont az az összekeveredés, amit az OrderReference séma megakadályozni hivatott.',
+                );
+            }
+        } else {
+            self::assertNull($result->orderRefSent, 'Ha nem indul /start, nem lehet kimenő orderRef sem.');
+        }
+
+        // A settled ág és az élő-fizetőoldal ág is `HttpRedirect`-et vagy
+        // `PaymentAlreadySettledException`-t dob — az egyetlen eset, ahol
+        // EGYIK sem történik, az soha nem áll fenn ebben a mátrixban
+        // (minden sor vagy /start-tal záruló HttpRedirect-et, vagy
+        // meglévő fizetőoldalra visszairányító HttpRedirect-et, vagy
+        // PaymentAlreadySettledException-t dob) — ezt implicit bizonyítja,
+        // hogy minden ág lefutott a `gateway->execute()` catch nélkül nem
+        // maradt volna nyitva.
     }
 
-    public function testConvertRunsAgainAfterAFraudRejectedTransactionDeadFailedGroup(): void
+    private function driveCapture(?TransactionStatus $status, string $timeoutMode): CaptureResult
     {
-        $log = $this->capture($this->payment(stateArray: [
-            'status' => TransactionStatus::Fraud->value,
-            'attempt' => 3,
-            'transactionId' => 'T3',
-        ], requestArray: ['orderRef' => 'EZ-2026-0042-17-3', 'attempt' => 3]));
+        $now = new \DateTimeImmutable();
 
-        self::assertContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        self::assertSame(4, $log->attemptAfter);
-        self::assertSame('EZ-2026-0042-17-4', $log->orderRefAfter);
-    }
+        $stateArray = [];
+        $requestArray = [];
 
-    public function testConvertDoesNotRunForALiveTransaction(): void
-    {
-        $log = $this->capture($this->payment(stateArray: [
-            'status' => TransactionStatus::Init->value,
-            'attempt' => 1,
-            'transactionId' => 'T1',
-        ], requestArray: ['orderRef' => 'EZ-2026-0042-17-1', 'attempt' => 1]));
+        if (null !== $status) {
+            $stateArray = [
+                'status' => $status->value,
+                'attempt' => 1,
+                'transactionId' => 'T-PRIOR',
+            ];
 
-        self::assertNotContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        // Az `attempt` és az `orderRef` VÁLTOZATLAN marad — a régi
-        // `simplepay_request` sértetlen, a még élő fizetőoldal
-        // újrafelhasználható (`CaptureAction::isLive()`, a frozen
-        // csomagban — ezt a tesztet itt nem szimuláljuk, csak azt
-        // bizonyítjuk, hogy a `Convert` nem futott újra, tehát a
-        // `simplepay_request` nem íródott felül).
-        self::assertSame(1, $log->attemptAfter);
-        self::assertSame('EZ-2026-0042-17-1', $log->orderRefAfter);
-    }
+            if ('n/a' !== $timeoutMode) {
+                $stateArray['paymentUrl'] = 'https://sandbox.simplepay.hu/pay/prior';
+                $stateArray['timeout'] = (
+                    'expired' === $timeoutMode
+                    ? $now->modify('-1 hour')
+                    : $now->modify('+1 hour')
+                )->format(\DateTimeInterface::ATOM);
+            }
 
-    public function testConvertDoesNotRunForASettledFinishedTransaction(): void
-    {
-        $log = $this->capture($this->payment(stateArray: [
-            'status' => TransactionStatus::Finished->value,
-            'attempt' => 1,
-            'transactionId' => 'T1',
-        ], requestArray: ['orderRef' => 'EZ-2026-0042-17-1', 'attempt' => 1]));
+            $requestArray = ['orderRef' => self::PRIOR_ORDER_REF, 'attempt' => 1];
+        }
 
-        self::assertNotContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        self::assertSame(1, $log->attemptAfter);
-        self::assertSame('EZ-2026-0042-17-1', $log->orderRefAfter);
-    }
+        $payment = $this->payment($stateArray, $requestArray);
 
-    public function testConvertDoesNotRunForASettledRefundedTransaction(): void
-    {
-        $log = $this->capture($this->payment(stateArray: [
-            'status' => TransactionStatus::Refund->value,
-            'attempt' => 1,
-            'transactionId' => 'T1',
-        ], requestArray: ['orderRef' => 'EZ-2026-0042-17-1', 'attempt' => 1]));
-
-        self::assertNotContains(\Payum\Core\Request\Convert::class, $log->executedRequestClasses);
-        self::assertSame(1, $log->attemptAfter);
-        self::assertSame('EZ-2026-0042-17-1', $log->orderRefAfter);
-    }
-
-    private function capture(PaymentInterface $payment): CaptureLog
-    {
         $gateway = new RecordingGateway();
 
         $convertAction = new ConvertPaymentAction($this->urlGenerator());
@@ -139,16 +202,29 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         $descriptionProvider = $this->createStub(PaymentDescriptionProviderInterface::class);
         $descriptionProvider->method('getPaymentDescription')->willReturn('teszt');
 
+        $mockHttpClient = new MockHttpClient();
+        $mockHttpClient->addResponse($this->signedStartResponse());
+
+        $psr17 = new Psr17Factory();
+        $client = new Client(
+            new Config('PUBLICTESTHUF', self::SECRET_KEY, Environment::Sandbox),
+            $mockHttpClient,
+            $psr17,
+            $psr17,
+        );
+        $api = new Api($client, 'PUBLICTESTHUF', Environment::Sandbox, Currency::HUF);
+
         // A SORREND számít: a `Gateway::findActionSupported()` az első
         // TÁMOGATÓ akciót választja. A `CapturePaymentAction`-nek meg kell
-        // előznie a néma felvevőt, hogy a KÜLSŐ (Payment modellű) Capture
-        // hozzá kerüljön, ne a felvevőhöz.
+        // előznie a frozen `SimplePayCaptureAction`-t, hogy a KÜLSŐ
+        // (Payment modellű) Capture hozzá kerüljön, ne a frozenhez.
         $gateway->addAction(new CapturePaymentAction($descriptionProvider));
         $gateway->addAction(new ExecuteSameRequestWithPaymentDetailsAction());
         $gateway->addAction($convertAction);
         $gateway->addAction(new StatusAction());
-        $gateway->addAction(new SilentArrayAccessCaptureAction());
+        $gateway->addAction(new SimplePayCaptureAction());
         $gateway->addExtension(new ForceReconvertOnDeadTransactionExtension());
+        $gateway->addApi($api);
 
         $token = $this->createStub(TokenInterface::class);
         $token->method('getHash')->willReturn('capture-token-hash');
@@ -156,56 +232,76 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         $token->method('getAfterUrl')->willReturn('https://bolt.hu/checkout/thank-you');
 
         // A VALÓDI Payum-folyamatban a `Capture` a tokennel konstruálódik
-        // (`new Capture($token)` — lásd `Sylius\...\Factory\CaptureFactory`),
-        // majd egy tokenfeloldó akció `setModel()`-lel cseréli a modellt a
-        // ténylegesre — a `Payum\Core\Request\Generic::setModel()` a
-        // konstruktorban beállított tokent NEM érinti. Ez a két lépés adja
-        // vissza pontosan azt, amit `CapturePaymentAction` a `$request->
-        // getToken()`-nel vár: egy VALÓS tokent, a Sylius Payment modell
-        // mellett.
+        // (`new Capture($token)`), majd egy tokenfeloldó akció `setModel()`-
+        // lel cseréli a modellt a ténylegesre — a `Generic::setModel()` a
+        // konstruktorban beállított tokent NEM érinti.
         $request = new Capture($token);
         $request->setModel($payment);
 
-        $gateway->execute($request);
+        $settledExceptionThrown = false;
 
-        $details = $payment->getDetails();
-        $requestArray = $this->typedArray($details[Details::REQUEST_KEY] ?? null);
-        $attempt = $requestArray['attempt'] ?? null;
-        $orderRef = $requestArray['orderRef'] ?? null;
+        // EGYETLEN `\Throwable`-ágra van szükség — a PHPStan a Payum
+        // dinamikus (reflection-alapú) akció-feloldását statikusan nem
+        // tudja végigkövetni, tehát egy külön `catch (PaymentAlready-
+        // SettledException)` ágat "sosem dobott" kivételnek látna, holott
+        // a teszt ténylegesen bizonyítja, hogy dobódik (lásd a mátrix
+        // "lezárt" sorait). A megkülönböztetés futásidejű `instanceof`.
+        try {
+            $gateway->execute($request);
+        } catch (\Throwable $exception) {
+            if ($exception instanceof PaymentAlreadySettledException) {
+                $settledExceptionThrown = true;
+            } elseif (!$exception instanceof HttpRedirect) {
+                // Vagy a meglévő élő fizetőoldalra irányít vissza (nincs
+                // /start), vagy a frissen indított tranzakció
+                // fizetőoldalára (volt /start) — a HttpRedirect a Payum
+                // szokásos, VÁRT vezérlésátadása, nem hiba. Bármi más
+                // kivétel valódi teszthiba.
+                throw $exception;
+            }
+        }
 
-        // Az `attempt`-et a `simplepay_request` (StartData) névtérből
-        // olvassuk, NEM a `simplepay_state`-ből: a `Convert` (amit ez a
-        // teszt vizsgál) a StartData-t írja, a `TransactionState.attempt`-et
-        // a — itt szándékosan néma dublyával helyettesített — VALÓDI
-        // `CaptureAction` frissítené egy sikeres `/start` után.
-        return new CaptureLog(
-            executedRequestClasses: $gateway->executedRequestClasses,
-            attemptAfter: is_int($attempt) ? $attempt : 0,
-            orderRefAfter: is_string($orderRef) ? $orderRef : '',
+        $requests = $mockHttpClient->getRequests();
+        $startRequestSent = [] !== $requests;
+        $orderRefSent = null;
+
+        if ($startRequestSent) {
+            $lastRequest = $mockHttpClient->getLastRequest();
+            $body = json_decode((string) $lastRequest?->getBody(), true, flags: \JSON_THROW_ON_ERROR);
+            $orderRefSent = is_array($body) && is_string($body['orderRef'] ?? null) ? $body['orderRef'] : null;
+        }
+
+        return new CaptureResult(
+            convertRan: in_array(Convert::class, $gateway->executedRequestClasses, true),
+            startRequestSent: $startRequestSent,
+            orderRefSent: $orderRefSent,
+            settledExceptionThrown: $settledExceptionThrown,
         );
     }
 
     /**
-     * A `Payment::getDetails()` `mixed`-et ígér a namespace-kulcsokra — ez
-     * az egyetlen hely, ahol a nyers értéket tömbre szűkítjük.
-     *
-     * @return array<string, mixed>
+     * A frozen `Client::start()` a válasz `Signature` fejlécét a SAJÁT
+     * `CodeConjure\SimplePay\Signature` algoritmusával (HMAC-SHA384, a
+     * `secretKey` felett) ellenőrzi — enélkül `SignatureException`-t dobna,
+     * mielőtt bármit mérhetnénk.
      */
-    private function typedArray(mixed $value): array
+    private function signedStartResponse(): ResponseInterface
     {
-        if (!is_array($value)) {
-            return [];
-        }
+        $payload = [
+            'salt' => bin2hex(random_bytes(16)),
+            'merchant' => 'PUBLICTESTHUF',
+            'orderRef' => 'IGNORED-A-VALASZ-SAJAT-ORDERREFJE',
+            'currency' => 'HUF',
+            'total' => 100000,
+            'timeout' => new \DateTimeImmutable('+30 minutes')->format(\DateTimeInterface::ATOM),
+            'transactionId' => 'T-FAKE-START',
+            'paymentUrl' => 'https://sandbox.simplepay.hu/pay/fake',
+        ];
 
-        $typed = [];
+        $body = (string) json_encode($payload, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
+        $signature = base64_encode(hash_hmac('sha384', $body, trim(self::SECRET_KEY), true));
 
-        foreach ($value as $key => $item) {
-            if (is_string($key)) {
-                $typed[$key] = $item;
-            }
-        }
-
-        return $typed;
+        return new Response(200, ['Signature' => $signature], $body);
     }
 
     private function genericTokenFactory(): GenericTokenFactoryInterface
@@ -335,32 +431,14 @@ final class RecordingGateway extends Gateway
     }
 }
 
-/**
- * A frozen `codeconjure/simplepay-payum` `CaptureAction` helyettesítője
- * ebben a tesztben: NEM indít valódi `/start` hívást. A teszt tárgya az,
- * HOGY a `Convert` újrafut-e — nem az, hogy a mögöttes SimplePay-hívás mit
- * csinál (azt a frozen csomag saját, itt nem módosított tesztjei fedik).
- */
-final class SilentArrayAccessCaptureAction implements ActionInterface
+/** A `driveCapture()` segédmetódus tipizált eredménye. */
+final readonly class CaptureResult
 {
-    public function execute($request): void
-    {
-    }
-
-    public function supports($request): bool
-    {
-        return $request instanceof Capture && $request->getModel() instanceof \ArrayAccess;
-    }
-}
-
-/** A `capture()` segédmetódus tipizált eredménye. */
-final readonly class CaptureLog
-{
-    /** @param list<class-string> $executedRequestClasses */
     public function __construct(
-        public array $executedRequestClasses,
-        public int $attemptAfter,
-        public string $orderRefAfter,
+        public bool $convertRan,
+        public bool $startRequestSent,
+        public ?string $orderRefSent,
+        public bool $settledExceptionThrown,
     ) {
     }
 }

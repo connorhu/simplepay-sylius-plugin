@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace CodeConjure\SyliusSimplePayPlugin\Extension;
 
+use CodeConjure\SimplePay\TransactionStatus;
+use CodeConjure\SimplePayPayum\Details;
 use Payum\Core\Extension\Context;
 use Payum\Core\Extension\ExtensionInterface;
 use Payum\Core\Request\GetStatusInterface;
@@ -13,12 +15,11 @@ use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
  * A `Convert` csak akkor fut újra a Sylius `CapturePaymentAction`-jében, ha
  * a `GetStatus` `NEW`-t jelent
  * (`vendor/sylius/sylius/.../PayumBundle/Action/CapturePaymentAction.php:46-49`).
- * Egy HALOTT tranzakcióra (CANCELLED, TIMEOUT, NOTAUTHORIZED, FRAUD) ez
- * sosem igaz — az `attempt` számláló nem nő, és egy újraindított
- * tranzakció a RÉGI, lejárt `simplepay_request`-ből indít `/start`-ot,
- * UGYANAZZAL az `orderRef`-fel. Ez pont az az összekeveredés, amit az
- * `OrderReference` séma megakadályozni hivatott (`QueryResponse::byOrderRef()`
- * két tranzakciót olvasztana össze).
+ * Enélkül az `attempt` számláló nem nő, és egy újraindított tranzakció a
+ * RÉGI `simplepay_request`-ből indít `/start`-ot, UGYANAZZAL az
+ * `orderRef`-fel. Ez pont az az összekeveredés, amit az `OrderReference`
+ * séma megakadályozni hivatott (`QueryResponse::byOrderRef()` két
+ * tranzakciót olvasztana össze).
  *
  * A Sylius `CapturePaymentAction` VENDOR kód, amit ez a plugin nem
  * módosíthat. A `GetStatus`-t viszont a plugin SAJÁT gateway-én
@@ -28,27 +29,36 @@ use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
  * `onPostExecute` minden `execute()`-hívás után lefut, a beágyazottakra
  * is).
  *
- * A TRÜKK: ha a `GetStatus` a NÉGY halott státusz egyikét jelenti
- * (`isCanceled()` = CANCELLED/TIMEOUT, `isFailed()` = NOTAUTHORIZED/FRAUD —
- * lásd `CodeConjure\SimplePayPayum\StatusMap::apply()`, ami e két jelzőre
- * KIMERÍTŐEN, más állapotot nem képezve, csak ezt a négyet képezi), ÉS ezt
- * a `GetStatus`-t KÖZVETLENÜL a Sylius `CapturePaymentAction` indította,
- * akkor újra `NEW`-nak jelöljük. A Sylius kód ezután `isNew()`-t lát, és
- * lefuttatja a `Convert`-et — épp úgy, mintha friss fizetés volna.
+ * R32 — A DÖNTÉS a frozen `CaptureAction::execute()` (`vendor/codeconjure/
+ * simplepay-payum/src/Action/CaptureAction.php:60-85`) HÁROM ágát tükrözi,
+ * NEM egy státusz-lista másolatát:
  *
- * MIÉRT BIZTONSÁGOS ez a manipuláció:
+ *   1. lezárt (`isSettled()`: FINISHED/REFUND/REVERSED) → `PaymentAlready-
+ *      SettledException`, nincs kérés;
+ *   2. `$state->isLive($now)` → `HttpRedirect` a meglévő fizetőoldalra,
+ *      nincs új tranzakció;
+ *   3. egyébként → valódi új `/start`.
  *
- *   - A `FINISHED`/`REFUND`/`REVERSED` állapotok `markCaptured()`-re
- *     illetve `markRefunded()`-re képződnek — ezeket ez az osztály sosem
- *     érinti, tehát a `PaymentAlreadySettledException` védelme (a
- *     `simplepay-payum` `CaptureAction`-jében) érintetlen marad: a
- *     duplikált terhelés elleni védelem NEM ezen az osztályon múlik,
- *     hanem a frozen csomagén — ez az osztály csak azt a KÜLÖN hibát
- *     javítja, hogy egy halott tranzakcióra sosem futott újra a `Convert`.
- *   - Az "élő" állapotok (INIT, INPAYMENT, INFRAUD, AUTHORIZED)
- *     `markPending()`-re illetve `markAuthorized()`-ra képződnek — ezekre
- *     sem fut le az újramintázás, a vevő a még élő fizetőoldalra kerül
- *     vissza (`CaptureAction::isLive()` a `simplepay-payum` csomagban).
+ * A 3. ág az EGYETLEN eset, ahol friss `orderRef` kell — ez az osztály
+ * PONTOSAN akkor jelöli a `GetStatus`-t `NEW`-nak, amikor a 3. ágat
+ * választaná a frozen kód: NEM lezárt ÉS NEM élő. Ez korábban (R26) csak
+ * négy állapotot (CANCELLED, TIMEOUT, NOTAUTHORIZED, FRAUD) fedett — ez a
+ * lista KIHAGYTA a "függőben, de lejárt" esetet (INIT/INPAYMENT/AUTHORIZED/
+ * INFRAUD, `isLive()` `false`, mert a fizetőoldal ablaka lejárt): egy
+ * hétköznapi elhagyott checkoutnál a vevő később visszatér, és a `Convert`
+ * ekkor SEM futott újra — a frozen `CaptureAction` a RÉGI `simplepay_request`-
+ * ből indított volna friss `/start`-ot, UGYANAZZAL az `orderRef`-fel.
+ *
+ * A `TransactionState::isLive()`-t KÖZVETLENÜL a frozen csomagból hívjuk
+ * (`vendor/codeconjure/simplepay-payum/src/Model/TransactionState.php:104`) —
+ * ez publikus, nem másolat. Az `isSettled()`-nek NINCS publikus
+ * megfelelője a frozen csomagban (a `CaptureAction`-beli privát), ezért ezt
+ * az osztály alján egy TÜKÖR-metódus adja, kimerítő `match`-csal — ugyanaz
+ * a házirend, mint az eredetiben: egy új `TransactionStatus` eset itt
+ * fordítási hibát ad, nem néma `false`-t.
+ *
+ * A HARD LIMIT VÁLTOZATLAN: egy lezárt fizetésre ez az osztály SOSEM
+ * jelöli `NEW`-nak a `GetStatus`-t.
  *
  * MIÉRT NEM SZIVÁROG KI a hatás máshova: a `Sylius\Bundle\PayumBundle\
  * Extension\UpdatePaymentStateExtension` ugyanezt a mintát használja saját
@@ -82,9 +92,39 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
             return;
         }
 
-        if ($request->isCanceled() || $request->isFailed()) {
-            $request->markNew();
+        // A `Sylius\Bundle\PayumBundle\Action\ExecuteSameRequestWithPayment-
+        // DetailsAction` (a Sylius saját Payment→ArrayObject hídja a
+        // `GetStatus`-hoz) a modellt ArrayObject-re cseréli, és SOSEM
+        // állítja vissza a Payment entitásra — tehát itt, a beágyazott
+        // hívás UTÁN, `$request->getModel()` már az ArrayObject-et adja,
+        // ugyanazt a nyers `details`-t, amit a frozen `StatusAction` és
+        // `CaptureAction` is olvas.
+        $model = $request->getModel();
+
+        if (!$model instanceof \ArrayAccess) {
+            return;
         }
+
+        $state = Details::fromModel($model)->state();
+
+        if (null === $state->status) {
+            // Nincs tárolt állapot — friss fizetés. A `StatusMap` ilyenkor
+            // már `markNew()`-t hívott, nincs mit tennünk.
+            return;
+        }
+
+        if (self::isSettled($state->status)) {
+            // A hard limit: sosem mintázunk újra egy lezárt fizetést.
+            return;
+        }
+
+        if ($state->isLive(new \DateTimeImmutable())) {
+            // Van még élő fizetőoldal — a frozen `CaptureAction` erre
+            // irányít vissza, nem indít új tranzakciót.
+            return;
+        }
+
+        $request->markNew();
     }
 
     /**
@@ -103,5 +143,29 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
         $parent = $previous[array_key_last($previous)];
 
         return $parent->getAction() instanceof CapturePaymentAction;
+    }
+
+    /**
+     * A frozen `CaptureAction::isSettled()` TÜKRE — az eredeti PRIVÁT,
+     * ezért innen nem hívható közvetlenül
+     * (`vendor/codeconjure/simplepay-payum/src/Action/CaptureAction.php:128-143`).
+     * A KÉT forrás szándékosan szó szerint egyezik, hogy egy jövőbeli
+     * összevetés triviális legyen.
+     */
+    private static function isSettled(TransactionStatus $status): bool
+    {
+        return match ($status) {
+            TransactionStatus::Finished,
+            TransactionStatus::Refund,
+            TransactionStatus::Reversed => true,
+            TransactionStatus::Init,
+            TransactionStatus::InPayment,
+            TransactionStatus::Authorized,
+            TransactionStatus::InFraud,
+            TransactionStatus::Cancelled,
+            TransactionStatus::Timeout,
+            TransactionStatus::NotAuthorized,
+            TransactionStatus::Fraud => false,
+        };
     }
 }
