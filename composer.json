@@ -16,6 +16,7 @@
         { "type": "vcs", "url": "https://github.com/connorhu/simplepay-payum" }
     ],
     "require-dev": {
+        "php-http/mock-client": "^1.6",
         "phpstan/phpstan": "^2.0",
         "phpunit/phpunit": "^12.0",
         "sylius-labs/coding-standard": "^4.4"
