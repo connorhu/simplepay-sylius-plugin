@@ -32,10 +32,19 @@ final class IpnControllerTest extends TestCase
 
     private const string ORDER_NUMBER = 'EZ-2026-0042';
 
-    private function paymentMethod(string $factoryName = 'simplepay'): PaymentMethodInterface
+    /**
+     * A `$gatewayName` a Payum regiszterbeli kulcs — a Sylius ezt a fizetési
+     * mód kódjából GENERÁLJA (kisbetűsítve, aláhúzással), tehát a valóságban
+     * csak akkor egyezik a kóddal, ha a kód már eleve kisbetűs és aláhúzásos.
+     * Alapértéke a jelenlegi tesztek meglévő 'simplepay' kódjával egyezik meg
+     * — ez a véletlen egyezés az oka, hogy a `$code`-dal való gateway-keresés
+     * hibája korábban egyetlen tesztet sem buktatott meg.
+     */
+    private function paymentMethod(string $factoryName = 'simplepay', string $gatewayName = 'simplepay'): PaymentMethodInterface
     {
         $gatewayConfig = $this->createStub(GatewayConfigInterface::class);
         $gatewayConfig->method('getFactoryName')->willReturn($factoryName);
+        $gatewayConfig->method('getGatewayName')->willReturn($gatewayName);
         $gatewayConfig->method('getConfig')->willReturn([
             'merchant' => 'PUBLICTESTHUF',
             'secretKey' => 'titok',
@@ -131,6 +140,7 @@ final class IpnControllerTest extends TestCase
         string $code = 'simplepay',
         string $orderRef = 'EZ-2026-0042-17-1',
         bool $trackPaymentLookup = false,
+        ?string $expectedGatewayName = null,
     ): IpnController {
         $paymentMethodRepository = $this->createMock(PaymentMethodRepositoryInterface::class);
         $paymentMethodRepository->expects(self::once())
@@ -152,8 +162,20 @@ final class IpnControllerTest extends TestCase
             $paymentRepository->method('find')->willReturn($payment);
         }
 
-        $payum = $this->createStub(Payum::class);
-        $payum->method('getGateway')->willReturn($this->gateway($executed, $resolveThrows, $orderRef));
+        // `$expectedGatewayName` NEM `null` esetén a Payum double `createMock()`,
+        // és az argumentumot is ellenőrzi — ez az egyetlen mód rá, hogy egy
+        // teszt buktassa, ha a `getGateway()` a payment method KÓDJÁT kapná a
+        // hitelesített `gatewayName` helyett.
+        if (null !== $expectedGatewayName) {
+            $payum = $this->createMock(Payum::class);
+            $payum->expects(self::once())
+                ->method('getGateway')
+                ->with($expectedGatewayName)
+                ->willReturn($this->gateway($executed, $resolveThrows, $orderRef));
+        } else {
+            $payum = $this->createStub(Payum::class);
+            $payum->method('getGateway')->willReturn($this->gateway($executed, $resolveThrows, $orderRef));
+        }
 
         return new IpnController(
             $paymentMethodRepository,
@@ -192,6 +214,29 @@ final class IpnControllerTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertSame(self::CONFIRMATION, $response->getContent());
         self::assertSame('aláírás', $response->headers->get('Signature'));
+    }
+
+    public function testTheGatewayIsResolvedByTheGatewayNameNotByThePaymentMethodCode(): void
+    {
+        // A Payum regiszterben a gateway a `gatewayName` alatt fut, amit a
+        // Sylius a fizetési mód KÓDJÁBÓL generál (kisbetűsítve, aláhúzással,
+        // lásd `GatewayNameGenerator`) — ez a két érték csak akkor egyezik,
+        // ha a kód már eleve kisbetűs és aláhúzásos. Ez a teszt szándékosan
+        // olyan kódot használ ("SimplePay HU"), ami NEM egyezik a
+        // gateway-nevével ("simplepay_hu"): ha a controller a `$code`-ot
+        // adná a `Payum::getGateway()`-nek a hitelesített `gatewayName`
+        // helyett, a mock `with()` elvárása buktatná ezt a tesztet.
+        $executed = [];
+
+        $response = $this->controller(
+            $executed,
+            $this->paymentMethod(gatewayName: 'simplepay_hu'),
+            $this->knownPayment(),
+            code: 'SimplePay HU',
+            expectedGatewayName: 'simplepay_hu',
+        )($this->request(), 'SimplePay HU');
+
+        self::assertSame(200, $response->getStatusCode());
     }
 
     public function testItResolvesBeforeItLooksUpThePaymentSoItNeverTrustsAnUnverifiedBody(): void
