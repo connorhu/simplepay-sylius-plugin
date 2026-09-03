@@ -1,0 +1,41 @@
+{
+    "name": "codeconjure/simplepay-sylius-plugin",
+    "description": "Sylius plugin for OTP SimplePay v2 payments",
+    "type": "sylius-plugin",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "codeconjure/simplepay": "dev-main",
+        "codeconjure/simplepay-payum": "dev-main",
+        "nyholm/psr7": "^1.8",
+        "sylius/sylius": "^2.1",
+        "symfony/http-client": "^7.2"
+    },
+    "require-dev": {
+        "php-http/mock-client": "^1.6",
+        "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^12.0",
+        "sylius-labs/coding-standard": "^4.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "CodeConjure\\SyliusSimplePayPlugin\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "CodeConjure\\SyliusSimplePayPlugin\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true,
+            "php-http/discovery": false,
+            "symfony/flex": false,
+            "symfony/thanks": false
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

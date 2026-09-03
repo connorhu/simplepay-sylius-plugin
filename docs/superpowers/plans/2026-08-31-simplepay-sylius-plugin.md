@@ -39,6 +39,7 @@
 | `src/Form/Type/SimplePayGatewayConfigurationType.php` | admin űrlap |
 | `src/Controller/IpnController.php` | tokenmentes IPN-végpont |
 | `src/Controller/ReturnController.php` | visszatérés a fizetőoldalról |
+| `src/Checkout/PaymentAlreadySettledListener.php` | a kifizetett rendelés capture-URL-je ne hibaoldalt adjon |
 | `src/Command/RefundCommand.php` | konzolos jóváírás |
 | `src/Debug/RecordingHttpClient.php` | nyers HTTP-forgalom rögzítése méréshez |
 | `src/View/SimplePayPaymentView.php` | admin read-model a `simplepay_state`-ből |
@@ -77,12 +78,16 @@ Egyetlen interfész és három konkrét kivétel; a Task 2 hozza létre őket, a
     "license": "MIT",
     "require": {
         "php": "^8.4",
-        "codeconjure/simplepay": "^1.0",
-        "codeconjure/simplepay-payum": "^1.0",
+        "codeconjure/simplepay": "dev-main",
+        "codeconjure/simplepay-payum": "dev-main",
         "nyholm/psr7": "^1.8",
         "sylius/sylius": "^2.1",
         "symfony/http-client": "^7.2"
     },
+    "repositories": [
+        { "type": "vcs", "url": "https://github.com/connorhu/simplepay-lib" },
+        { "type": "vcs", "url": "https://github.com/connorhu/simplepay-payum" }
+    ],
     "require-dev": {
         "phpstan/phpstan": "^2.0",
         "phpunit/phpunit": "^12.0",
@@ -107,7 +112,8 @@ Egyetlen interfész és három konkrét kivétel; a Task 2 hozza létre őket, a
             "symfony/thanks": false
         }
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "dev",
+    "prefer-stable": true
 }
 ```
 
@@ -115,14 +121,27 @@ Egyetlen interfész és három konkrét kivétel; a Task 2 hozza létre őket, a
 > Sylius kernelt tesztben), de éles használatban valódi függőség: a plugin
 > Sylius interfészekre típusoz. Marad a `require`-ben.
 >
-> **A `codeconjure/simplepay-payum` feloldásáról:** amíg egyik csomag sincs a
-> Packagiston, add hozzá helyben, a `composer.json` érintése nélkül:
+> **A `dev-main` és a VCS repositoryk nem ideiglenesek — mérés áll mögöttük**
+> (2026-09-01):
+> - `codeconjure/simplepay` **nincs fent a Packagiston** (a
+>   `repo.packagist.org/p2/codeconjure/simplepay.json` 404-et ad), és **nincs
+>   verzió-tagje** (`git tag -l` egyetlen `backup-elotte` sort ad).
+> - `codeconjure/simplepay-payum` **fent van a Packagiston, de nulla stabil
+>   verzióval** — a `p2` válasza üres tömb, csak a `~dev` változat hoz
+>   `dev-main`-t; **verzió-tagja szintén nincs.**
+>
+> Ezért `^1.0` **nem oldható fel**, és a `minimum-stability: stable` mellett a
+> `dev-main` sem. A composer **csak a gyökércsomag `repositories` blokkját
+> veszi figyelembe** — a payum csomag saját repositoryja innen nem látszik —,
+> ezért a `simplepay-lib` VCS bejegyzése itt kötelező.
+>
+> **Path repository a commitolt fájlba nem kerülhet.** Helyi fejlesztéshez a
+> fájlon kívül adható meg, és commit előtt ki kell venni:
 > ```bash
 > composer config repositories.simplepay path ../simplepay
-> composer config repositories.simplepay-payum path ../simplepay-payum
+> composer config --unset repositories.simplepay
 > ```
-> A Task 14 zárja le, hogy a commitolt `composer.json`-ba VCS repository
-> kerüljön (vagy semmi, ha addigra fent vannak a Packagiston).
+> A Task 14 ezt az állapotot **ellenőrzi**, nem vezeti be.
 
 - [ ] **Step 2: Eszköz-konfigurációk**
 
@@ -991,12 +1010,7 @@ final class LocaleToLanguageMap
         'de' => Language::De,
     ];
 
-    public function resolve(?string $localeCode): Language
-    {
-        return self::resolveStatic($localeCode);
-    }
-
-    public static function resolveStatic(?string $localeCode): Language
+    public static function resolve(?string $localeCode): Language
     {
         if (null === $localeCode || '' === trim($localeCode)) {
             throw new IncompletePaymentException(
@@ -1019,16 +1033,15 @@ final class LocaleToLanguageMap
 }
 ```
 
-> **Egy statikus és egy példány-metódus is van.** A statikus a tesztnek és a
-> gyors használatnak kényelmes, a példány-metódus pedig azért kell, hogy a
-> `ConvertPaymentAction` konstruktoron át kapja meg, és a viselkedés
-> lecserélhető legyen anélkül, hogy az actiont kellene átírni. A teszt a
-> statikus alakot hívja `LocaleToLanguageMap::resolve(...)` néven —
-> **javítsd a tesztet `resolveStatic`-ra**, vagy tedd a `resolve()`-t
-> statikussá és hagyd el a példány-metódust. **Döntsd el az implementációkor,
-> és tartsd következetesen.** Az egyszerűbb út: csak `public static function
-> resolve()`, példány-metódus nélkül, és a `ConvertPaymentAction` közvetlenül
-> hívja — YAGNI, amíg nincs második leképezés.
+> **Eldöntve: csak `public static function resolve()`, példány-metódus
+> nélkül.** A terv korábbi változata mindkettőt hozta, és a tesztet a
+> statikus alakhoz igazította volna. A `ConvertPaymentAction` közvetlenül
+> hívja a statikusat — egy második leképezés nélkül a példány-metódus és a
+> hozzá tartozó konstruktor-paraméter YAGNI. Ha valaha kell cserélhető
+> leképezés, az interfész-bevezetéssel jár, nem egy delegáló metódussal.
+>
+> Az osztály `final`, a `MAP` konstans, tehát a statikus hívás nem
+> akadályozza a tesztelést.
 
 - [ ] **Step 4: Futtasd, győződj meg róla, hogy átmegy**
 
@@ -2169,7 +2182,7 @@ ott nem találunk ki IPN-URL-t."
 - Consumes: `GatewayConfigReader` (Task 5), `OrderReference` (Task 3), `CodeConjure\SimplePayPayum\Request\ResolveSimplePayIpn`
 - Produces:
   - route `codeconjure_simplepay_ipn`: `POST /payment/simplepay/ipn/{code}`
-  - `new IpnController(PaymentMethodRepositoryInterface $paymentMethodRepository, PaymentRepositoryInterface $paymentRepository, Payum $payum, EntityManagerInterface $entityManager, ReplyToSymfonyResponseConverter $replyConverter, LoggerInterface $logger)`
+  - `new IpnController(PaymentMethodRepositoryInterface $paymentMethodRepository, PaymentRepositoryInterface $paymentRepository, Payum $payum, EntityManagerInterface $entityManager, ReplyToSymfonyResponseConverter $replyConverter, ?LoggerInterface $logger = null)`
 
 - [ ] **Step 1: A route megírása**
 
@@ -2453,6 +2466,7 @@ use Payum\Core\Payum;
 use Payum\Core\Reply\ReplyInterface;
 use Payum\Core\Request\Notify;
 use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Sylius\Component\Core\Model\PaymentInterface;
 use Sylius\Component\Core\Repository\PaymentRepositoryInterface;
 use Sylius\Component\Payment\Model\PaymentMethodInterface;
@@ -2478,7 +2492,15 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  */
 final class IpnController
 {
+    private readonly LoggerInterface $logger;
+
     /**
+     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * `null`-t ad, ha nincs naplózó. A paraméternek ezért nullable-nek KELL
+     * lennie: a Payum-csomagban pontosan ez a párosítás — `on-invalid="null"`
+     * ígéret és nem-nullable konstruktor — akadályozta meg a bundle bootolását,
+     * és csak a konténer-fordítási teszt találta meg.
+     *
      * @param PaymentMethodRepositoryInterface<PaymentMethodInterface> $paymentMethodRepository
      * @param PaymentRepositoryInterface<PaymentInterface>             $paymentRepository
      */
@@ -2488,8 +2510,9 @@ final class IpnController
         private readonly Payum $payum,
         private readonly EntityManagerInterface $entityManager,
         private readonly ReplyToSymfonyResponseConverter $replyConverter,
-        private readonly LoggerInterface $logger,
+        ?LoggerInterface $logger = null,
     ) {
+        $this->logger = $logger ?? new NullLogger();
     }
 
     public function __invoke(Request $request, string $code): Response
@@ -2782,6 +2805,7 @@ use Payum\Core\Payum;
 use Payum\Core\Request\GetHumanStatus;
 use Payum\Core\Request\Sync;
 use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -2800,11 +2824,18 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class ReturnController
 {
+    private readonly LoggerInterface $logger;
+
+    /**
+     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * `null`-t ad, ha nincs naplózó — a paraméter ezért nullable.
+     */
     public function __construct(
         private readonly Payum $payum,
         private readonly EntityManagerInterface $entityManager,
-        private readonly LoggerInterface $logger,
+        ?LoggerInterface $logger = null,
     ) {
+        $this->logger = $logger ?? new NullLogger();
     }
 
     public function __invoke(Request $request): Response
@@ -2889,6 +2920,398 @@ Az állapotot a Sync dönti el, sosem a böngészőn átjött r/s adat. Saját
 visszatérési sablon nincs: a token afterUrl-jére irányítunk, vagyis a Sylius
 köszönő/hibaoldalára. A sikertelen lekérdezés naplózódik, de nem töri el a
 vevő oldalát — az IPN úgyis megérkezik."
+```
+
+---
+
+### Task 9b: `Checkout\PaymentAlreadySettledListener` — a kifizetett rendelés capture-URL-je
+
+**Files:**
+- Create: `src/Checkout/PaymentAlreadySettledListener.php`
+- Test: `tests/Unit/Checkout/PaymentAlreadySettledListenerTest.php`
+
+**Interfaces:**
+- Consumes: `CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException`, `Payum\Core\Payum`, `Sync`, `GetHumanStatus`
+- Produces: `new PaymentAlreadySettledListener(Payum $payum, EntityManagerInterface $entityManager, ?LoggerInterface $logger = null)` — `kernel.exception` figyelő (a bekötést a Task 13 hozza)
+
+**Miért van erre szükség — a mért ok.** A `codeconjure/simplepay-payum`
+`CaptureAction`-je `PaymentAlreadySettledException`-t dob, ha a tárolt státusz
+`FINISHED`, `REFUND` vagy `REVERSED`, és **nem küld kérést**. Ez helyes: ez
+akadályozza meg a dupla terhelést. A boltban viszont a `Capture`-t a Payum
+`CaptureController::doAction()` futtatja, ami így néz ki:
+
+```php
+$token = $this->getPayum()->getHttpRequestVerifier()->verify($request);
+$gateway = $this->getPayum()->getGateway($token->getGatewayName());
+$gateway->execute(new Capture($token));                      // ← innen száll ki
+$this->getPayum()->getHttpRequestVerifier()->invalidate($token);
+return $this->redirect($token->getAfterUrl());
+```
+
+A kivétel a `execute()`-ból száll ki, tehát **sem az invalidálás, sem az
+átirányítás nem fut le** — és mivel a `/start` átirányítás után a token nem
+lett érvénytelenítve, a capture-URL **érvényes marad**. Elérhető út: az IPN
+megérkezik és `FINISHED`-re állít, a vevő visszalép a böngészőben a capture-URL-re
+→ **500-as hibaoldal egy kifizetett rendelésen**.
+
+Pénzügyi kockázat nincs — a kivétel épp ezt zárja ki. A kár tisztán az, hogy a
+vevő hibaoldalt lát siker helyett. A figyelő ezt a varratot zárja be: elkapja a
+kivételt, lekérdezi a valódi állapotot, és a vevőt a Sylius szokásos oldalára
+engedi — pontosan oda, ahová a sikeres capture is vitte volna.
+
+- [ ] **Step 1: A bukó teszt megírása**
+
+`tests/Unit/Checkout/PaymentAlreadySettledListenerTest.php`:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace CodeConjure\SyliusSimplePayPlugin\Tests\Unit\Checkout;
+
+use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
+use CodeConjure\SyliusSimplePayPlugin\Checkout\PaymentAlreadySettledListener;
+use Doctrine\ORM\EntityManagerInterface;
+use Payum\Core\GatewayInterface;
+use Payum\Core\Payum;
+use Payum\Core\Request\GetHumanStatus;
+use Payum\Core\Request\Sync;
+use Payum\Core\Security\HttpRequestVerifierInterface;
+use Payum\Core\Security\TokenInterface;
+use PHPUnit\Framework\TestCase;
+use Psr\Log\NullLogger;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Event\ExceptionEvent;
+use Symfony\Component\HttpKernel\HttpKernelInterface;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+
+final class PaymentAlreadySettledListenerTest extends TestCase
+{
+    private const string AFTER_URL = 'https://bolt.hu/rendeles/koszonjuk';
+
+    /**
+     * @param list<object> $executed
+     */
+    private function listener(
+        array &$executed,
+        ?HttpRequestVerifierInterface $verifier = null,
+        ?\Throwable $syncThrows = null,
+    ): PaymentAlreadySettledListener {
+        $token = $this->createStub(TokenInterface::class);
+        $token->method('getAfterUrl')->willReturn(self::AFTER_URL);
+        $token->method('getGatewayName')->willReturn('simplepay');
+
+        if (null === $verifier) {
+            $verifier = $this->createStub(HttpRequestVerifierInterface::class);
+            $verifier->method('verify')->willReturn($token);
+        }
+
+        $gateway = $this->createStub(GatewayInterface::class);
+        $gateway->method('execute')->willReturnCallback(
+            static function (object $request) use (&$executed, $syncThrows): void {
+                $executed[] = $request;
+
+                if ($request instanceof Sync && null !== $syncThrows) {
+                    throw $syncThrows;
+                }
+            },
+        );
+
+        $payum = $this->createStub(Payum::class);
+        $payum->method('getHttpRequestVerifier')->willReturn($verifier);
+        $payum->method('getGateway')->willReturn($gateway);
+
+        return new PaymentAlreadySettledListener(
+            $payum,
+            $this->createStub(EntityManagerInterface::class),
+            new NullLogger(),
+        );
+    }
+
+    private function event(\Throwable $throwable): ExceptionEvent
+    {
+        return new ExceptionEvent(
+            $this->createStub(HttpKernelInterface::class),
+            Request::create('/payment/capture/token-hash-123'),
+            HttpKernelInterface::MAIN_REQUEST,
+            $throwable,
+        );
+    }
+
+    private function settled(): PaymentAlreadySettledException
+    {
+        return new PaymentAlreadySettledException('A fizetés már lezárult.');
+    }
+
+    public function testItRedirectsToTheTokenAfterUrlInsteadOfLettingTheErrorPageThrough(): void
+    {
+        $executed = [];
+        $event = $this->event($this->settled());
+
+        $this->listener($executed)($event);
+
+        $response = $event->getResponse();
+        self::assertInstanceOf(RedirectResponse::class, $response);
+        self::assertSame(self::AFTER_URL, $response->getTargetUrl());
+    }
+
+    public function testItSyncsBeforeItReadsTheStatusSoTheOrderShowsWhatReallyHappened(): void
+    {
+        // A kivétel csak annyit mond, hogy a TÁROLT státusz lezárt. Az
+        // átirányítás előtt lekérdezzük az igazit, hogy a Sylius oldala ne
+        // egy elavult details alapján döntsön.
+        $executed = [];
+
+        $this->listener($executed)($this->event($this->settled()));
+
+        self::assertInstanceOf(Sync::class, $executed[0]);
+        self::assertInstanceOf(GetHumanStatus::class, $executed[1]);
+    }
+
+    public function testItLeavesEveryOtherExceptionAlone(): void
+    {
+        $executed = [];
+        $event = $this->event(new \RuntimeException('valami más'));
+
+        $this->listener($executed)($event);
+
+        self::assertNull($event->getResponse());
+        self::assertSame([], $executed, 'Idegen kivételre semmilyen Payum kérés nem futhat.');
+    }
+
+    public function testItFindsTheExceptionWhenItArrivesAsAPreviousCause(): void
+    {
+        // A Payum és a Symfony rétegei becsomagolhatják a kivételt; a
+        // felismerés az egész okláncra megy.
+        $executed = [];
+        $event = $this->event(new \RuntimeException('burok', 0, $this->settled()));
+
+        $this->listener($executed)($event);
+
+        self::assertInstanceOf(RedirectResponse::class, $event->getResponse());
+    }
+
+    public function testItIgnoresSubRequests(): void
+    {
+        // Egy beágyazott kérés kimenete nem irányíthatja át a fő választ.
+        $executed = [];
+        $event = new ExceptionEvent(
+            $this->createStub(HttpKernelInterface::class),
+            Request::create('/payment/capture/token-hash-123'),
+            HttpKernelInterface::SUB_REQUEST,
+            $this->settled(),
+        );
+
+        $this->listener($executed)($event);
+
+        self::assertNull($event->getResponse());
+        self::assertSame([], $executed);
+    }
+
+    public function testAFailedSyncStillRedirectsRatherThanShowingTheError(): void
+    {
+        // Ugyanaz az elv, mint a ReturnControllerben: a vevő böngészője nem a
+        // hibakezelés helye. Az állapotot úgyis az IPN hozza rendbe.
+        $executed = [];
+        $event = $this->event($this->settled());
+
+        $this->listener($executed, syncThrows: new \RuntimeException('hálózati hiba'))($event);
+
+        $response = $event->getResponse();
+        self::assertInstanceOf(RedirectResponse::class, $response);
+        self::assertSame(self::AFTER_URL, $response->getTargetUrl());
+    }
+
+    public function testWithoutAResolvableTokenTheOriginalExceptionStands(): void
+    {
+        // Ha nincs token a kérésben, nincs afterUrl sem, ahová vihetnénk a
+        // vevőt. Ilyenkor a kivétel maradjon — az elnyelése néma hibát adna.
+        $executed = [];
+        $verifier = $this->createStub(HttpRequestVerifierInterface::class);
+        $verifier->method('verify')->willThrowException(new NotFoundHttpException('nincs token'));
+
+        $event = $this->event($this->settled());
+
+        $this->listener($executed, verifier: $verifier)($event);
+
+        self::assertNull($event->getResponse());
+        self::assertSame([], $executed);
+    }
+
+    public function testItNeverInvalidatesTheTokenBecauseTheAfterPayPageStillNeedsIt(): void
+    {
+        $token = $this->createStub(TokenInterface::class);
+        $token->method('getAfterUrl')->willReturn(self::AFTER_URL);
+        $token->method('getGatewayName')->willReturn('simplepay');
+
+        $verifier = $this->createMock(HttpRequestVerifierInterface::class);
+        $verifier->method('verify')->willReturn($token);
+        $verifier->expects($this->never())->method('invalidate');
+
+        $executed = [];
+        $event = $this->event($this->settled());
+
+        $this->listener($executed, verifier: $verifier)($event);
+
+        // Az invalidate() elmaradását a mock never() elvárása őrzi; az
+        // átirányítás azt bizonyítja, hogy a figyelő tényleg végigfutott.
+        self::assertInstanceOf(RedirectResponse::class, $event->getResponse());
+    }
+}
+```
+
+- [ ] **Step 2: Futtasd, győződj meg róla, hogy bukik**
+
+```bash
+vendor/bin/phpunit tests/Unit/Checkout/PaymentAlreadySettledListenerTest.php
+```
+
+Elvárt: FAIL, `Class "…\Checkout\PaymentAlreadySettledListener" not found`.
+
+- [ ] **Step 3: A figyelő megírása**
+
+`src/Checkout/PaymentAlreadySettledListener.php`:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace CodeConjure\SyliusSimplePayPlugin\Checkout;
+
+use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
+use Doctrine\ORM\EntityManagerInterface;
+use Payum\Core\Payum;
+use Payum\Core\Request\GetHumanStatus;
+use Payum\Core\Request\Sync;
+use Payum\Core\Security\TokenInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpKernel\Event\ExceptionEvent;
+
+/**
+ * A már kifizetett rendelés capture-URL-jének újratöltését zárja le.
+ *
+ * A Payum `CaptureController` a `$gateway->execute(new Capture($token))` után
+ * invalidálná a tokent és átirányítana — de ha a `CaptureAction`
+ * `PaymentAlreadySettledException`-t dob, egyik sem fut le, és a vevő 500-as
+ * oldalt kap egy kifizetett rendelésen. A kivétel maga helyes: ez akadályozza
+ * meg a dupla terhelést. Csak a vevőnek szánt kimenet hiányzik mögüle.
+ *
+ * A figyelő ezért nem javít semmit az állapoton: lekérdezi az igazit
+ * (`Sync`), frissíti a Sylius fizetés-státuszt (`GetHumanStatus`), és a token
+ * `afterUrl`-jére irányít — oda, ahová a sikeres capture is vitte volna.
+ */
+final class PaymentAlreadySettledListener
+{
+    private readonly LoggerInterface $logger;
+
+    /**
+     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * `null`-t ad, ha nincs naplózó — a paraméter ezért nullable.
+     */
+    public function __construct(
+        private readonly Payum $payum,
+        private readonly EntityManagerInterface $entityManager,
+        ?LoggerInterface $logger = null,
+    ) {
+        $this->logger = $logger ?? new NullLogger();
+    }
+
+    public function __invoke(ExceptionEvent $event): void
+    {
+        // Egy beágyazott kérés kimenete nem irányíthatja át a fő választ.
+        if (!$event->isMainRequest()) {
+            return;
+        }
+
+        if (!$this->isAlreadySettled($event->getThrowable())) {
+            return;
+        }
+
+        $token = $this->resolveToken($event);
+
+        if (null === $token) {
+            // Nincs hová vinni a vevőt. A kivétel elnyelése itt néma hiba
+            // volna, ezért érintetlenül hagyjuk az eseményt.
+            return;
+        }
+
+        $gateway = $this->payum->getGateway($token->getGatewayName());
+
+        try {
+            $gateway->execute(new Sync($token));
+            $gateway->execute(new GetHumanStatus($token));
+            $this->entityManager->flush();
+        } catch (\Throwable $exception) {
+            // A vevő böngészője nem a hibakezelés helye. Az állapotot az IPN
+            // úgyis rendbe hozza; a vevőt engedjük a Sylius oldalára.
+            $this->logger->error('A már lezárult fizetés állapot-lekérdezése nem sikerült.', [
+                'event' => 'simplepay.capture.already_settled_sync_failed',
+                'reason' => $exception->getMessage(),
+            ]);
+        }
+
+        $this->logger->info('Egy már lezárult fizetés capture-címét töltötték újra.', [
+            'event' => 'simplepay.capture.already_settled',
+            'after_url' => $token->getAfterUrl(),
+        ]);
+
+        $event->setResponse(new RedirectResponse($token->getAfterUrl()));
+    }
+
+    /**
+     * A kivétel a Payum és a Symfony rétegein át becsomagolva is megérkezhet,
+     * ezért az egész okláncot végigjárjuk.
+     */
+    private function isAlreadySettled(\Throwable $throwable): bool
+    {
+        for ($current = $throwable; null !== $current; $current = $current->getPrevious()) {
+            if ($current instanceof PaymentAlreadySettledException) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * A tokent NEM invalidáljuk: a Sylius after-pay oldalnak még kell, és a
+     * `PaymentAlreadySettledException` maga akadályozza meg, hogy az újra
+     * meghívott capture bármit is elindítson.
+     */
+    private function resolveToken(ExceptionEvent $event): ?TokenInterface
+    {
+        try {
+            return $this->payum->getHttpRequestVerifier()->verify($event->getRequest());
+        } catch (\Throwable $exception) {
+            $this->logger->warning('A lezárult fizetés kéréséhez nem tartozik feloldható Payum token.', [
+                'event' => 'simplepay.capture.already_settled_no_token',
+                'reason' => $exception->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Futtasd és commitolj**
+
+```bash
+vendor/bin/phpunit tests/Unit/Checkout/PaymentAlreadySettledListenerTest.php
+vendor/bin/phpstan analyse -c phpstan.dist.neon
+vendor/bin/ecs check
+git add src/Checkout/PaymentAlreadySettledListener.php tests/Unit/Checkout/PaymentAlreadySettledListenerTest.php
+git commit -m "feat(checkout): a kifizetett rendelés capture-címe ne hibaoldalt adjon
+
+A CaptureAction PaymentAlreadySettledException-je helyesen akadályozza meg a
+dupla terhelést, de a Payum CaptureController átirányítása már nem fut le
+mögötte, így a vevő 500-as oldalt kapna egy kifizetett rendelésen. A figyelő
+lekérdezi az igazi állapotot, és a token afterUrl-jére irányít."
 ```
 
 ---
@@ -4037,11 +4460,18 @@ visszaigazolásunkat nem fogadták el."
 
 **Files:**
 - Modify: `src/Resources/config/services.xml`
-- Test: `tests/Unit/ServiceDefinitionTest.php`
+- Test: `tests/Unit/ServiceDefinitionTest.php`, `tests/Integration/ContainerCompilationTest.php`
 
 **Interfaces:**
 - Consumes: minden korábbi task
 - Produces: minden szolgáltatás bekötve, a `payum.action` és `sylius.gateway_configuration_type` tagekkel
+
+> **Két teszt, két különböző kérdésre.** A `ServiceDefinitionTest` a
+> *deklarációt* nézi: ott van-e a szolgáltatás, jó tageket kapott-e. A
+> `ContainerCompilationTest` a *működést*: felépül-e a konténer, és
+> **példányosítható-e** minden szolgáltatás. A Payum-csomag bootolási hibáját
+> — `on-invalid="null"` ígéret nem-nullable konstruktor mellett — csak a
+> második fajta teszt találta meg; deklaráció-szinten tökéletesen nézett ki.
 
 - [ ] **Step 1: A bukó teszt megírása**
 
@@ -4055,9 +4485,11 @@ declare(strict_types=1);
 namespace CodeConjure\SyliusSimplePayPlugin\Tests\Unit;
 
 use CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction;
+use CodeConjure\SyliusSimplePayPlugin\Checkout\PaymentAlreadySettledListener;
 use CodeConjure\SyliusSimplePayPlugin\Command\RefundCommand;
 use CodeConjure\SyliusSimplePayPlugin\Controller\IpnController;
 use CodeConjure\SyliusSimplePayPlugin\Controller\ReturnController;
+use CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient;
 use CodeConjure\SyliusSimplePayPlugin\DependencyInjection\CodeConjureSyliusSimplePayExtension;
 use CodeConjure\SyliusSimplePayPlugin\Form\Type\SimplePayGatewayConfigurationType;
 use CodeConjure\SyliusSimplePayPlugin\Twig\SimplePayExtension;
@@ -4085,6 +4517,8 @@ final class ServiceDefinitionTest extends TestCase
         yield 'visszatérési controller' => [ReturnController::class];
         yield 'refund parancs' => [RefundCommand::class];
         yield 'Twig extension' => [SimplePayExtension::class];
+        yield 'lezárult fizetés figyelő' => [PaymentAlreadySettledListener::class];
+        yield 'rögzítő HTTP kliens' => [RecordingHttpClient::class];
     }
 
     /** @param class-string $class */
@@ -4123,6 +4557,28 @@ final class ServiceDefinitionTest extends TestCase
         self::assertTrue($container->getDefinition(IpnController::class)->isPublic());
         self::assertTrue($container->getDefinition(ReturnController::class)->isPublic());
     }
+
+    public function testTheRecordingClientDecoratesTheApplicationsHttpClient(): void
+    {
+        // Enélkül a --record néma no-op: a gateway a dekorálatlan klienst
+        // kapná, és a RefundCommand egy forgalom nélküli példányt kapcsolna be.
+        $decorated = $this->container()
+            ->getDefinition(RecordingHttpClient::class)
+            ->getDecoratedService();
+
+        self::assertNotNull($decorated, 'A rögzítő kliens nem dekorál semmit.');
+        self::assertSame('Psr\Http\Client\ClientInterface', $decorated[0]);
+    }
+
+    public function testTheSettledListenerIsRegisteredForTheKernelExceptionEvent(): void
+    {
+        $tags = $this->container()
+            ->getDefinition(PaymentAlreadySettledListener::class)
+            ->getTag('kernel.event_listener');
+
+        self::assertCount(1, $tags);
+        self::assertSame('kernel.exception', $tags[0]['event'] ?? null);
+    }
 }
 ```
 
@@ -4160,10 +4616,30 @@ Elvárt: FAIL — a `services.xml` egyelőre üres.
             <tag name="form.type"/>
         </service>
 
-        <service id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient">
-            <argument type="service" id="Psr\Http\Client\ClientInterface"/>
+        <!-- DEKORÁTOR, nem külön szolgáltatás. A gateway HTTP-kliensét a
+             codeconjure/simplepay-payum SimplePayGatewayFactoryBuilder kapja
+             meg a konténerből, `Psr\Http\Client\ClientInterface` néven. Ha a
+             RecordingHttpClient csak egy önálló szolgáltatás volna, a
+             RefundCommand `enable()`-je egy olyan példányt kapcsolna be,
+             amin soha nem megy át forgalom — a --record néma no-op lenne.
+             A dekorálás miatt a gateway kliense MAGA a rögzítő, ami
+             kikapcsolt állapotban tiszta átengedés. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient"
+                 decorates="Psr\Http\Client\ClientInterface">
+            <argument type="service" id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient.inner"/>
             <argument>%kernel.project_dir%/var/simplepay</argument>
             <argument>false</argument>
+        </service>
+
+        <!-- A kernel.exception figyelőnek csak egy sorrendi kikötése van: a
+             Symfony hibaoldalt előállító ErrorListenere -128 prioritáson fut,
+             tehát az alapértelmezett 0 bőven előtte van. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Checkout\PaymentAlreadySettledListener">
+            <argument type="service" id="payum"/>
+            <argument type="service" id="doctrine.orm.entity_manager"/>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="kernel.event_listener" event="kernel.exception"/>
+            <tag name="monolog.logger" channel="simplepay"/>
         </service>
 
         <service id="CodeConjure\SyliusSimplePayPlugin\Controller\IpnController" public="true">
@@ -4207,18 +4683,195 @@ Elvárt: FAIL — a `services.xml` egyelőre üres.
 > alkalmazásban a `symfony/http-client` `Psr18Client`-jére kell mutasson.
 > Ha nincs ilyen alias, a Task 15 veszi fel az app `services.yaml`-jába.
 
-- [ ] **Step 4: Futtasd és commitolj**
+- [ ] **Step 4: A konténer-fordítási teszt megírása**
+
+Ez a task egyetlen olyan varrata, ami egységtesztben nem látszik: a
+`services.xml` és a konstruktorok **együtt** vagy működnek, vagy nem. A teszt
+külső szolgáltatásokat szintetikusan vesz fel, lefordítja a konténert, majd
+**tényleg példányosít** minden plugin-szolgáltatást — egyszer naplózóval,
+egyszer anélkül.
+
+`tests/Integration/ContainerCompilationTest.php`:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace CodeConjure\SyliusSimplePayPlugin\Tests\Integration;
+
+use CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient;
+use CodeConjure\SyliusSimplePayPlugin\DependencyInjection\CodeConjureSyliusSimplePayExtension;
+use Doctrine\ORM\EntityManagerInterface;
+use Payum\Bundle\PayumBundle\ReplyToSymfonyResponseConverter;
+use Payum\Core\Payum;
+use PHPUnit\Framework\TestCase;
+use Psr\Http\Client\ClientInterface;
+use Psr\Log\NullLogger;
+use Sylius\Component\Core\Repository\OrderRepositoryInterface;
+use Sylius\Component\Core\Repository\PaymentRepositoryInterface;
+use Sylius\Component\Payment\Repository\PaymentMethodRepositoryInterface;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\Routing\RouterInterface;
+
+/**
+ * A `services.xml` és a konstruktorok együttes ellenőrzése.
+ *
+ * A `ServiceDefinitionTest` csak azt nézi, MI van deklarálva. Ez a teszt
+ * lefordítja a konténert és példányosít: itt bukik ki az a fajta hiba, ami a
+ * Payum-csomagban a bundle bootolását akadályozta meg — a `services.xml`
+ * `on-invalid="null"`-t ígért, a konstruktor nem-nullable-t követelt.
+ */
+final class ContainerCompilationTest extends TestCase
+{
+    /**
+     * Minden szolgáltatás, amit a plugin a befogadó alkalmazástól vár.
+     * A `logger` szándékosan NINCS a listán: azt esetenként adjuk hozzá.
+     *
+     * @var array<string, class-string>
+     */
+    private const array EXTERNAL_SERVICES = [
+        'router' => RouterInterface::class,
+        'payum' => Payum::class,
+        'doctrine.orm.entity_manager' => EntityManagerInterface::class,
+        'payum.reply_to_symfony_response_converter' => ReplyToSymfonyResponseConverter::class,
+        'sylius.repository.payment_method' => PaymentMethodRepositoryInterface::class,
+        'sylius.repository.payment' => PaymentRepositoryInterface::class,
+        'sylius.repository.order' => OrderRepositoryInterface::class,
+        'Psr\Http\Client\ClientInterface' => ClientInterface::class,
+    ];
+
+    /**
+     * A dekorált PSR-18 kliens azonosítója a fordítás UTÁN. A Symfony a
+     * dekorált szolgáltatást `<dekoráló azonosító>.inner` néven nevezi át.
+     */
+    private const string DECORATED_CLIENT_ID = RecordingHttpClient::class . '.inner';
+
+    private function compiledContainer(bool $withLogger): ContainerBuilder
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.project_dir', sys_get_temp_dir());
+
+        foreach (self::EXTERNAL_SERVICES as $id => $class) {
+            $container->register($id, $class)->setSynthetic(true)->setPublic(true);
+        }
+
+        if ($withLogger) {
+            $container->register('logger', NullLogger::class)->setPublic(true);
+        }
+
+        new CodeConjureSyliusSimplePayExtension()->load([], $container);
+
+        // A plugin szolgáltatásai éles konténerben privátak; itt publikussá
+        // tesszük őket, hogy a get() ténylegesen példányosítson.
+        foreach ($this->pluginServiceIds($container) as $id) {
+            $container->getDefinition($id)->setPublic(true);
+        }
+
+        $container->compile();
+
+        foreach (self::EXTERNAL_SERVICES as $id => $class) {
+            $container->set(
+                'Psr\Http\Client\ClientInterface' === $id ? self::DECORATED_CLIENT_ID : $id,
+                $this->createStub($class),
+            );
+        }
+
+        return $container;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function pluginServiceIds(ContainerBuilder $container): array
+    {
+        $ids = [];
+
+        foreach (array_keys($container->getDefinitions()) as $id) {
+            if (str_starts_with($id, 'CodeConjure\\SyliusSimplePayPlugin\\')) {
+                $ids[] = $id;
+            }
+        }
+
+        return $ids;
+    }
+
+    public function testEveryServiceCanBeInstantiatedWhenTheApplicationProvidesEverything(): void
+    {
+        $container = $this->compiledContainer(withLogger: true);
+        $ids = $this->pluginServiceIds($container);
+
+        self::assertNotSame([], $ids, 'A kiterjesztés egyetlen szolgáltatást sem töltött be.');
+
+        foreach ($ids as $id) {
+            self::assertIsObject($container->get($id), sprintf('A(z) %s nem példányosítható.', $id));
+        }
+    }
+
+    public function testTheBundleStillWorksWithoutALoggerService(): void
+    {
+        // A services.xml on-invalid="null"-t ígér a loggerre. Ha egy
+        // konstruktor nem-nullable naplózót követel, ez a teszt bukik — a
+        // Payum-csomagban pontosan ez akadályozta meg a bundle bootolását.
+        $container = $this->compiledContainer(withLogger: false);
+
+        self::assertFalse($container->has('logger'));
+
+        foreach ($this->pluginServiceIds($container) as $id) {
+            self::assertIsObject($container->get($id), sprintf('A(z) %s naplózó nélkül nem példányosítható.', $id));
+        }
+    }
+
+    public function testTheRecordingClientReallyWrapsTheApplicationsClient(): void
+    {
+        // A dekorálás a --record működésének a feltétele: a gateway a
+        // konténerből kapja a klienst, és ha nem a rögzítőt kapja, a
+        // kapcsoló némán nem csinál semmit.
+        $container = $this->compiledContainer(withLogger: true);
+
+        self::assertInstanceOf(
+            RecordingHttpClient::class,
+            $container->get(RecordingHttpClient::class),
+        );
+        self::assertTrue(
+            $container->has(self::DECORATED_CLIENT_ID),
+            'A dekorált kliens azonosítója nem jött létre — a dekorálás nem történt meg.',
+        );
+    }
+}
+```
+
+**A `phpunit.xml.dist`-et is bővíteni kell**, különben ez a teszt soha nem fut
+le, és a suite zölden hallgat róla. A Task 1 csak a `tests/Unit` suite-ot vette
+fel; egészítsd ki:
+
+```xml
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+```
+
+Ellenőrizd, hogy tényleg fut: a `vendor/bin/phpunit` kimenetében a teszt-szám
+nőnie kell, és a `vendor/bin/phpunit --testsuite=integration` nem adhat
+„No tests found" üzenetet.
+
+- [ ] **Step 5: Futtasd és commitolj**
 
 ```bash
 vendor/bin/phpunit
 vendor/bin/phpstan analyse -c phpstan.dist.neon
 vendor/bin/ecs check
-git add src/Resources/config/services.xml tests/Unit/ServiceDefinitionTest.php
+git add src/Resources/config/services.xml phpunit.xml.dist \
+    tests/Unit/ServiceDefinitionTest.php tests/Integration/ContainerCompilationTest.php
 git commit -m "feat(di): a plugin szolgáltatásainak bekötése
 
 A payum.action tag factory attribútuma a simplepay gateway-re korlátozza a
 Convert actiont — enélkül minden gateway megkapná, és egy PayPal fizetés is
-SimplePay payloaddá alakulna."
+SimplePay payloaddá alakulna. A rögzítő HTTP kliens dekorátorként ül a
+PSR-18 kliensen, különben a --record kapcsoló némán nem csinálna semmit.
+
+A konténer-fordítási teszt tényleg példányosít, naplózóval és anélkül is:
+a Payum-csomag bootolási hibáját deklaráció-szintű teszt nem találta meg."
 ```
 
 ---
@@ -4233,22 +4886,26 @@ SimplePay payloaddá alakulna."
 - Consumes: minden korábbi task
 - Produces: telepíthető, dokumentált plugin
 
-- [ ] **Step 1: A `composer.json` függőség-feloldásának lezárása**
+- [ ] **Step 1: A `composer.json` függőség-feloldásának ellenőrzése**
 
-Ugyanaz a döntés, mint a Payum csomagnál: ha a két `codeconjure/*` csomag
-felkerült a Packagistra, semmi teendő. Ha nem, VCS repository kell:
+A Task 1 már a végleges alakot vette fel (`dev-main` + két VCS repository +
+`minimum-stability: dev` + `prefer-stable: true`), mérésre alapozva. Itt ezt
+**ellenőrizni** kell, nem bevezetni:
 
-```json
-"repositories": [
-    { "type": "vcs", "url": "https://github.com/connorhu/simplepay-lib" },
-    { "type": "vcs", "url": "https://github.com/connorhu/simplepay-payum" }
-],
-"minimum-stability": "dev",
-"prefer-stable": true
+```bash
+git diff --stat origin/main -- composer.json
+grep -n '"path"' composer.json          # üres kell legyen
+composer validate --strict
+composer update --dry-run codeconjure/simplepay codeconjure/simplepay-payum
 ```
 
-és a kikötések `dev-main`-re. **Path repository a commitolt fájlba nem
-kerülhet** — az csak a fejlesztő gépén működik, és a CI-t némán elrontja.
+- **Path repository nem lehet a fájlban** — csak egy gépen működik, és a CI-t
+  némán elrontja.
+- Ha időközben **verzió-tagot** kapott valamelyik csomag és felkerült a
+  Packagistra, a kikötés `^1.0`-ra szűkíthető és a hozzá tartozó `repositories`
+  bejegyzés elhagyható. **Ezt ellenőrizd, ne feltételezd** — 2026-09-01-én
+  egyik csomagnak sem volt tagje, és a `codeconjure/simplepay` a Packagiston
+  sem volt fent.
 
 - [ ] **Step 2: A README megírása**
 
@@ -4367,6 +5024,29 @@ plugin figyelmeztetést mutat. Ez azt jelenti, hogy a SimplePay nem fogadta
 el az aláírt visszaigazolásunkat, és újraküldi az értesítést. A jelenleg
 egyetlen ismert gyanúsított a `receiveDate` időbélyeg formátuma — lásd a
 `codeconjure/simplepay-payum` README „Ismert bizonytalanságok" szakaszát.
+
+## Ismert korlátok
+
+**A részleges jóváírás Payum felé teljesként látszik.** A
+`simplepay:refund --amount=…` valódi részösszeget ír a SimplePay felé, és a
+SimplePay helyesen is dolgozza fel — de a `codeconjure/simplepay-payum`
+`StatusMap`-je a `REFUND` státuszt a `remainingTotal` figyelmen kívül
+hagyásával `markRefunded()`-re képezi. A Sylius fizetés tehát **teljesen
+jóváírtnak** látszik akkor is, ha csak egy részét írtuk jóvá. Ráadásul a
+`REFUND` státusz után a Payum-csomag átmenet-őre minden későbbi `Sync`
+státuszváltást visszautasít, a `RefundAction` pedig a `refundTotal`-t
+hívásonként felülírja, nem halmozza — **két részleges jóváírás után a details
+az utolsó összeget mutatja, nem az összesítettet.**
+
+Ez a Payum-réteg tervezési következménye, nem ennek a pluginnak a hibája: az őr
+szigorúsága szándékos. A `simplepay:refund` viszont elfogad részösszeget, tehát
+**itt válik láthatóvá**. Amíg nem rendezzük, a részleges jóváírás valódi
+elszámolása a SimplePay kereskedői panelben látszik, nem a Syliusban.
+
+**Ha egy már kifizetett rendelés fizetési oldalát töltik újra**, a
+`CaptureAction` `PaymentAlreadySettledException`-t dob a dupla terhelés ellen.
+A plugin ezt elkapja, lekérdezi az igazi állapotot, és a vevőt a Sylius
+szokásos oldalára viszi — hibaoldal helyett.
 
 ## Amit ez a plugin nem tud
 
@@ -4689,11 +5369,12 @@ szabadon törhető."
 
 ## Nyitott döntések, amiket az implementer hoz meg
 
-Mindhárom szándékosan marad nyitva: a válasz csak a kód írása közben derül ki,
-és a terv jobban jár egy megnevezett kérdéssel, mint egy kitalált válasszal.
+A válasz csak a kód írása közben derül ki, és a terv jobban jár egy megnevezett
+kérdéssel, mint egy kitalált válasszal.
 
-1. **Task 4** — `LocaleToLanguageMap::resolve()` statikus vagy példány-metódus.
-   Ajánlás: csak statikus, YAGNI.
+1. ~~**Task 4** — `LocaleToLanguageMap::resolve()` statikus vagy
+   példány-metódus.~~ **Eldöntve (2026-09-01): csak statikus**, példány-metódus
+   nélkül. A terv szövege ennek megfelelően javítva.
 2. **Task 8** — ismeretlen rendelésnél mi legyen a `Notify` modellje. Ajánlás:
    eldobható `\ArrayObject`, és a teszt `assertCount` értékének igazítása.
 3. **Task 15, 3. lépés** — a rendelés-oldali admin hook pontos neve. A

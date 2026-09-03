@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="http://symfony.com/schema/dic/services"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://symfony.com/schema/dic/services http://symfony.com/schema/dic/services/services-1.0.xsd">
+    <services>
+        <defaults autowire="false" autoconfigure="false" public="false"/>
+
+        <!-- A payum.action tag "factory" attribútuma korlátozza az actiont
+             a simplepay gateway-re. Enélkül MINDEN gateway megkapná a
+             Convert actionünket, és egy PayPal fizetés is SimplePay
+             payloaddá alakulna. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction">
+            <argument type="service" id="router"/>
+            <tag name="payum.action" factory="simplepay"/>
+        </service>
+
+        <!-- A payum.extension tag "factory" attribútuma ugyanúgy a
+             simplepay gateway-re korlátozza, mint a payum.action fent.
+             R26 (2. találat): a Sylius CapturePaymentAction csak akkor
+             futtatja újra a Convert-et, ha a GetStatus NEW-t jelent — egy
+             halott tranzakcióra (CANCELLED, TIMEOUT, NOTAUTHORIZED, FRAUD)
+             ez sosem igaz. Ez a kiterjesztés a beágyazott GetStatus-t
+             NEW-ra jelöli át ilyenkor, hogy a vendor kód a Convert-et
+             mégis lefuttassa. Lásd az osztály docblockját. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension">
+            <tag name="payum.extension" factory="simplepay"/>
+        </service>
+
+        <service id="CodeConjure\SyliusSimplePayPlugin\Form\Type\SimplePayGatewayConfigurationType">
+            <tag name="sylius.gateway_configuration_type" type="simplepay" label="SimplePay"/>
+            <tag name="form.type"/>
+        </service>
+
+        <!-- DEKORÁTOR, nem külön szolgáltatás. A gateway HTTP-kliensét a
+             codeconjure/simplepay-payum SimplePayGatewayFactoryBuilder kapja
+             meg a konténerből, `Psr\Http\Client\ClientInterface` néven. Ha a
+             RecordingHttpClient csak egy önálló szolgáltatás volna, a
+             RefundCommand `enable()`-je egy olyan példányt kapcsolna be,
+             amin soha nem megy át forgalom — a „record” kapcsoló néma no-op lenne.
+             A dekorálás miatt a gateway kliense MAGA a rögzítő, ami
+             kikapcsolt állapotban tiszta átengedés. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient"
+                 decorates="Psr\Http\Client\ClientInterface">
+            <argument type="service" id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient.inner"/>
+            <argument>%kernel.project_dir%/var/simplepay</argument>
+            <argument>false</argument>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="monolog.logger" channel="simplepay"/>
+        </service>
+
+        <!-- A kernel.exception figyelőnek csak egy sorrendi kikötése van: a
+             Symfony hibaoldalt előállító ErrorListenere -128 prioritáson fut,
+             tehát az alapértelmezett 0 bőven előtte van. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Checkout\PaymentAlreadySettledListener">
+            <argument type="service" id="payum"/>
+            <argument type="service" id="doctrine.orm.entity_manager"/>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="kernel.event_listener" event="kernel.exception"/>
+            <tag name="monolog.logger" channel="simplepay"/>
+        </service>
+
+        <service id="CodeConjure\SyliusSimplePayPlugin\Controller\IpnController" public="true">
+            <argument type="service" id="sylius.repository.payment_method"/>
+            <argument type="service" id="sylius.repository.payment"/>
+            <argument type="service" id="payum"/>
+            <argument type="service" id="doctrine.orm.entity_manager"/>
+            <argument type="service" id="payum.converter.reply_to_http_response"/>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="monolog.logger" channel="simplepay"/>
+        </service>
+
+        <service id="CodeConjure\SyliusSimplePayPlugin\Controller\ReturnController" public="true">
+            <argument type="service" id="payum"/>
+            <argument type="service" id="doctrine.orm.entity_manager"/>
+            <argument type="service" id="logger" on-invalid="null"/>
+            <tag name="monolog.logger" channel="simplepay"/>
+        </service>
+
+        <service id="CodeConjure\SyliusSimplePayPlugin\Command\RefundCommand">
+            <argument type="service" id="sylius.repository.order"/>
+            <argument type="service" id="payum"/>
+            <argument type="service" id="doctrine.orm.entity_manager"/>
+            <argument type="service" id="CodeConjure\SyliusSimplePayPlugin\Debug\RecordingHttpClient"/>
+            <tag name="console.command"/>
+        </service>
+
+        <service id="CodeConjure\SyliusSimplePayPlugin\Twig\SimplePayExtension">
+            <tag name="twig.extension"/>
+        </service>
+    </services>
+</container>

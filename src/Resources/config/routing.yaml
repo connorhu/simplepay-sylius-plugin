@@ -1,0 +1,11 @@
+codeconjure_simplepay_ipn:
+    path: /payment/simplepay/ipn/{code}
+    methods: [POST]
+    controller: CodeConjure\SyliusSimplePayPlugin\Controller\IpnController
+    requirements:
+        code: '[A-Za-z0-9_-]+'
+
+codeconjure_simplepay_return:
+    path: /payment/simplepay/return
+    methods: [GET]
+    controller: CodeConjure\SyliusSimplePayPlugin\Controller\ReturnController

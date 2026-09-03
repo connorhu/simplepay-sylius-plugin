@@ -54,6 +54,7 @@ src/
     CodeConjureSyliusSimplePayPlugin.php
     DependencyInjection/…
     Action/ConvertPaymentAction.php
+    Extension/ForceReconvertOnDeadTransactionExtension.php
     Money/SyliusAmountConverter.php
     Order/OrderReferenceFactory.php
     Order/OrderReferenceParser.php
@@ -98,6 +99,28 @@ A `próbálkozás` értékét a Convert **javasolja** (`simplepay_state.attempt 
 egy új tranzakciót. Ha a Capture újrahasznosítja a még élő tranzakciót, a javasolt érték
 eldobódik, és a következő Convert ugyanazt javasolja újra. Így a számláló pontosan a valóban
 elindított tranzakciókat számolja.
+
+**FRISSÍTÉS (a záró átvizsgálás 2. találata, R26/R32 döntés nyomán) — ehhez a Convert-nek
+ÚJRA KELL FUTNIA, amikor a régi (stale) tranzakció halott.** A Sylius saját
+`CapturePaymentAction`-je (vendor) a `Convert`-et KIZÁRÓLAG akkor futtatja, ha a `GetStatus`
+`NEW`-t jelent — ez az eredeti terv hallgatólagos, de téves feltevése volt: egy TÁROLT,
+de halott státuszra (a `CaptureAction` frozen háromágú döntése szerint: nem lezárt ÉS nem
+élő) a Sylius kód SOHA nem futtatta volna újra a Convert-et, tehát a `próbálkozás` befagyott,
+és egy újraindított tranzakció a RÉGI `orderRef`-fel indított volna friss `/start`-ot —
+pontosan azt a keveredést okozva, amit ez a fejezet fent leír.
+
+A javítás egy dedikált Payum gateway-kiterjesztés
+(`CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension`),
+ami a beágyazott `GetStatus`-t — KIZÁRÓLAG akkor, ha azt közvetlenül a `CapturePaymentAction`
+indította — `NEW`-nak jelöli, pontosan akkor, amikor a frozen `CaptureAction` a saját
+harmadik ágát (friss `/start`) választaná: **nem lezárt** (`FINISHED`/`REFUND`/`REVERSED`)
+ÉS **nem él** (`TransactionState::isLive()`). Ez lefedi mind a négy „halott, végleges"
+állapotot (`CANCELLED`/`TIMEOUT`/`NOTAUTHORIZED`/`FRAUD`), MIND a „függőben, de lejárt"
+esetet (`INIT`/`INPAYMENT`/`AUTHORIZED`/`INFRAUD` egy lejárt fizetőoldal-ablakkal) — ez utóbbi
+egy hétköznapi elhagyott checkoutnál fordul elő, és az eredeti javítás (ami csak a négy
+végleges státuszt fedte) még nem vette észre. Egy lezárt fizetésre a kiterjesztés SOSEM
+avatkozik be — a `PaymentAlreadySettledException` védelme a frozen `CaptureAction`-ben
+érintetlen marad.
 
 > **Nyitott kérdés.** Az `orderRef` **maximális hosszát** az 1. fázis nem rögzítette.
 > Az implementáció első feladata kikeresni a hivatalos PDF-ből
@@ -180,6 +203,71 @@ esemény-jelzővel:
 ```
 
 A protokoll-csomag mindig a differenciált `urls` formát küldi, sosem a string `url`-t.
+
+**FRISSÍTÉS (a záró átvizsgálás 1. találata, R25 döntés nyomán) — a `payum_token` NEM a
+capture token hash-e.** Az eredeti terv ezt hallgatólagosan feltételezte, és ez tévedés volt:
+a capture token `targetUrl`-je a `/payment/capture/{hash}` útvonal, a vevő viszont a plugin
+saját `codeconjure_simplepay_return` route-jára tér vissza. A `Payum\Core\Security\Util\
+RequestTokenVerifier::isValid()` a bejövő kérés és a token célútvonalát NYERS
+karakterlánc-egyenlőséggel hasonlítja — a kettő sosem egyezett volna, és minden visszatérés
+HTTP 400-at dobott volna, mielőtt a `Sync` egyáltalán lefutott.
+
+A tényleges megoldás: a `ConvertPaymentAction` megvalósítja a
+`Payum\Core\Security\GenericTokenFactoryAwareInterface`-t. A Payum ezt minden gateway
+felépítésekor automatikusan behuzalozza (`GenericTokenFactoryExtension`,
+`PayumBuilder::buildGateway()`) — **nincs szükség saját szolgáltatás-bekötésre**. Az akció a
+kapott gyárral egyetlen, DEDIKÁLT tokent mintáz a visszatérés route-jára, a capture token
+gateway nevével és `afterUrl`-jével:
+
+```php
+$genericTokenFactory->createToken(
+    $captureToken->getGatewayName(),
+    $payment,
+    ConvertPaymentAction::RETURN_ROUTE,
+    [],
+    $captureToken->getAfterUrl(), // már teljes URL — az AbstractTokenFactory ezt
+                                   // változtatás nélkül állítja be `afterUrl`-ként
+);
+```
+
+Mivel a `RequestTokenVerifier` csak az útvonalat nézi, a lekérdezés-stringet nem, EZ AZ EGY
+token szolgálja ki mind a négy URL-t — azok csak az `e` paraméterben térnek el. A végső
+átirányítás a mintázott token `afterUrl`-jén keresztül ugyanarra az oldalra visz, mint a
+capture folyamat (a Sylius szokásos köszönő/hibaoldalára).
+
+### 4.6 `ForceReconvertOnDeadTransactionExtension` — újramintázás halott tranzakcióra
+
+**ÚJ (a záró átvizsgálás 2. találata, R26/R32 döntés nyomán).** A `ConvertPaymentAction`
+önmagában nem elég: a Sylius saját `CapturePaymentAction`-je (vendor) a `Convert`-et
+KIZÁRÓLAG akkor futtatja, ha a `GetStatus` `NEW`-t jelent
+(`vendor/sylius/sylius/.../PayumBundle/Action/CapturePaymentAction.php:46-49`) — egy TÁROLT,
+de halott állapotra ez sosem igaz, tehát a `próbálkozás` számláló befagyna, és egy
+újraindított tranzakció a RÉGI `orderRef`-fel indítana friss `/start`-ot (lásd 4.1).
+
+A `CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension`
+egy Payum gateway-kiterjesztés, a `simplepay` factory-ra szűkítve (`payum.extension` tag,
+ugyanúgy, mint a `ConvertPaymentAction` `payum.action` tagje). A beágyazott `GetStatus`
+`onPostExecute()`-jában — ha azt közvetlenül a `CapturePaymentAction` indította — a frozen
+`CaptureAction::execute()` (`vendor/codeconjure/simplepay-payum/src/Action/CaptureAction.php:
+60-85`) SAJÁT háromágú döntését tükrözi:
+
+1. **lezárt** (`FINISHED`/`REFUND`/`REVERSED`) → nincs beavatkozás, a
+   `PaymentAlreadySettledException` védelme érintetlen;
+2. **él** (`TransactionState::isLive()`, a frozen csomagból közvetlenül hívva) → nincs
+   beavatkozás, a vevő a meglévő fizetőoldalra kerül vissza;
+3. **egyébként** → a `GetStatus`-t `NEW`-nak jelöli, a Sylius kód ezután lefuttatja a
+   `Convert`-et, mintha friss fizetés volna.
+
+A 3. ág fedi le mind a négy „halott, végleges" állapotot (`CANCELLED`/`TIMEOUT`/
+`NOTAUTHORIZED`/`FRAUD`), MIND a „függőben, de lejárt" esetet (`INIT`/`INPAYMENT`/
+`AUTHORIZED`/`INFRAUD` egy lejárt fizetőoldal-ablakkal) — ez utóbbi egy hétköznapi elhagyott
+checkoutnál fordul elő: a vevő elhagyja a SimplePay oldalt, se IPN, se visszatérés nem
+frissíti az állapotot, majd később újra fizetni próbál.
+
+A hatókör-szűkítés (csak a `CapturePaymentAction` által KÖZVETLENÜL indított, beágyazott
+`GetStatus`-ra reagál) ugyanazt a mintát használja, mint a Sylius saját
+`UpdatePaymentStateExtension`-je a `getPrevious()` verem-mélységén — csak fordítva: az
+utóbbi a VERSZINTŰ hívásokra szűkít, ez a kiterjesztés a BEÁGYAZOTTAKRA.
 
 ## 5. Admin gateway űrlap
 
