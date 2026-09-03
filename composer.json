@@ -11,10 +11,6 @@
         "sylius/sylius": "^2.1",
         "symfony/http-client": "^7.2"
     },
-    "repositories": [
-        { "type": "vcs", "url": "https://github.com/connorhu/simplepay-lib" },
-        { "type": "vcs", "url": "https://github.com/connorhu/simplepay-payum" }
-    ],
     "require-dev": {
         "php-http/mock-client": "^1.6",
         "phpstan/phpstan": "^2.0",
