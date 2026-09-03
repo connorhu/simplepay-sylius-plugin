@@ -14,6 +14,7 @@ use Payum\Core\Payum;
 use Payum\Core\Reply\HttpResponse;
 use Payum\Core\Request\Notify;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Sylius\Component\Core\Model\PaymentInterface;
 use Sylius\Component\Core\Repository\PaymentRepositoryInterface;
@@ -141,6 +142,7 @@ final class IpnControllerTest extends TestCase
         string $orderRef = 'EZ-2026-0042-17-1',
         bool $trackPaymentLookup = false,
         ?string $expectedGatewayName = null,
+        ?LoggerInterface $logger = null,
     ): IpnController {
         $paymentMethodRepository = $this->createMock(PaymentMethodRepositoryInterface::class);
         $paymentMethodRepository->expects(self::once())
@@ -183,7 +185,7 @@ final class IpnControllerTest extends TestCase
             $payum,
             $entityManager ?? $this->createStub(EntityManagerInterface::class),
             new ReplyToSymfonyResponseConverter(),
-            new NullLogger(),
+            $logger ?? new NullLogger(),
         );
     }
 
@@ -415,5 +417,159 @@ final class IpnControllerTest extends TestCase
 
         self::assertSame(400, $response->getStatusCode());
         self::assertSame([], $executed, 'Aláírás nélkül a gateway-t meg sem szabad szólítani.');
+    }
+
+    /**
+     * A `IpnController::UNTRUSTED_BODY_EXCERPT_LIMIT` valódi értéke — a
+     * tesztek szándékosan EZT a konkrét számot várják el (nem tükrözik
+     * vissza a konstansot), hogy a korlát felemelése ténylegesen megbuktasson
+     * egy tesztet.
+     */
+    private const int UNTRUSTED_BODY_EXCERPT_LIMIT = 4096;
+
+    private function requestWithContent(string $content, bool $signed = true): Request
+    {
+        return Request::create(
+            '/payment/simplepay/ipn/simplepay',
+            'POST',
+            server: $signed ? ['HTTP_SIGNATURE' => 'aláírás'] : [],
+            content: $content,
+        );
+    }
+
+    public function testAMissingSignatureHeaderLogsTheBodyExcerptAndItsTrueLength(): void
+    {
+        $executed = [];
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.ipn.unsigned' === ($context['event'] ?? null) &&
+                        self::BODY === ($context['body_excerpt'] ?? null) &&
+                        strlen(self::BODY) === ($context['body_length'] ?? null),
+                ),
+            );
+
+        $this->controller($executed, $this->paymentMethod(), null, logger: $logger)(
+            $this->requestWithContent(self::BODY, signed: false),
+            'simplepay',
+        );
+    }
+
+    public function testAForgedSignatureLogsTheBodyExcerptAndItsTrueLength(): void
+    {
+        $executed = [];
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.ipn.rejected' === ($context['event'] ?? null) &&
+                        self::BODY === ($context['body_excerpt'] ?? null) &&
+                        strlen(self::BODY) === ($context['body_length'] ?? null),
+                ),
+            );
+
+        $this->controller(
+            $executed,
+            $this->paymentMethod(),
+            null,
+            new SignatureException('hamis aláírás'),
+            logger: $logger,
+        )($this->requestWithContent(self::BODY), 'simplepay');
+    }
+
+    public function testAnOverlongUnsignedBodyIsTruncatedToTheCapButTheReportedLengthStaysTrue(): void
+    {
+        // Az aláíratlan ág TÁMADÓ ÁLTAL VEZÉRELT: egy 5000 bájtos törzs (a
+        // korlát fölött) csonkolva kerül a naplóba, de a `body_length`-nek
+        // az IGAZI, vágás előtti hosszat kell mutatnia — különben a
+        // bejegyzés hazudna arról, mekkora volt az eredeti kérés.
+        $executed = [];
+        $overlongBody = str_repeat('X', 5000);
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => ($context['body_excerpt'] ?? null)
+                        === str_repeat('X', self::UNTRUSTED_BODY_EXCERPT_LIMIT) &&
+                        ($context['body_length'] ?? null) === 5000,
+                ),
+            );
+
+        $this->controller($executed, $this->paymentMethod(), null, logger: $logger)(
+            $this->requestWithContent($overlongBody, signed: false),
+            'simplepay',
+        );
+    }
+
+    public function testAnUnknownOrderLogsTheFullAuthenticBodyWithoutTruncation(): void
+    {
+        // A törzs itt már átment az aláírás-ellenőrzésen (a mock gateway
+        // sikeresen "resolve"-olja), tehát hiteles — akkor is teljes
+        // egészében naplózható, ha meghaladja a hitelesítetlen ágak
+        // korlátját.
+        $executed = [];
+        $overlongBody = str_repeat('Y', self::UNTRUSTED_BODY_EXCERPT_LIMIT + 1000);
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())
+            ->method('error')
+            ->with(
+                self::isString(),
+                self::callback(
+                    static fn (array $context): bool => 'simplepay.ipn.unknown_order' === ($context['event'] ?? null) &&
+                        $overlongBody === ($context['body'] ?? null),
+                ),
+            );
+
+        $this->controller($executed, $this->paymentMethod(), null, logger: $logger)(
+            $this->requestWithContent($overlongBody),
+            'simplepay',
+        );
+    }
+
+    public function testAMismatchedOrderNumberLogsTheFullAuthenticBody(): void
+    {
+        // A `findPayment()` az `order_mismatch` eseményt naplózza, utána a
+        // hívó `__invoke()` — mivel `null` payment-et kap — az
+        // `unknown_order` eseményt IS naplózza (két különálló `error()`
+        // hívás). A mockon `->with()`-szel nem lehet hívásonként eltérő
+        // elvárást megfogalmazni, ezért a kontextusokat begyűjtjük, és
+        // utólag ellenőrizzük az `order_mismatch` bejegyzést.
+        $executed = [];
+        $mismatchedPayment = $this->knownPayment('MASIK-RENDELES-0099');
+        $loggedContexts = [];
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::exactly(2))
+            ->method('error')
+            ->willReturnCallback(static function (string $message, array $context) use (&$loggedContexts): void {
+                $loggedContexts[] = $context;
+            });
+
+        $this->controller($executed, $this->paymentMethod(), $mismatchedPayment, logger: $logger)(
+            $this->requestWithContent(self::BODY),
+            'simplepay',
+        );
+
+        $mismatchContext = null;
+
+        foreach ($loggedContexts as $context) {
+            if ('simplepay.ipn.order_mismatch' === ($context['event'] ?? null)) {
+                $mismatchContext = $context;
+            }
+        }
+
+        self::assertNotNull($mismatchContext, 'Az order_mismatch eseménynek szerepelnie kell a naplóban.');
+        self::assertSame(self::BODY, $mismatchContext['body'] ?? null);
     }
 }

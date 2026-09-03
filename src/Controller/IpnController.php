@@ -40,6 +40,19 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  */
 final class IpnController
 {
+    /**
+     * A hitelesítetlen ágakon (aláírás hiányzik, vagy nem stimmel) naplózott
+     * törzs-részlet felső korlátja bájtban. A végpont hitelesítés nélkül
+     * hívható, tehát ezeken az ágakon a törzs TÁMADÓ ÁLTAL VEZÉRELT — ha
+     * korlátlanul naplóznánk, egy ismételt POST-ozással bárki megtölthetné a
+     * lemezt, aki ismeri az URL-t. Egy valódi SimplePay IPN törzs jellemzően
+     * néhány száz bájt (orderRef, transactionId, status és néhány dátum); a
+     * 4096 bájt (4 KiB) ennek több, mint tízszerese, tehát bőven elég a
+     * hibakereséshez, ugyanakkor nagyságrendekkel kisebb annál, hogy egy
+     * visszatérő kérés érdemben árasztani tudná vele a naplófájlt.
+     */
+    private const int UNTRUSTED_BODY_EXCERPT_LIMIT = 4096;
+
     private readonly LoggerInterface $logger;
 
     /**
@@ -81,6 +94,7 @@ final class IpnController
                 'event' => 'simplepay.ipn.unsigned',
                 'payment_method' => $code,
                 'client_ip' => $request->getClientIp(),
+                ...$this->untrustedBodyContext($request->getContent()),
             ]);
 
             return new Response('Missing Signature header.', Response::HTTP_BAD_REQUEST);
@@ -106,19 +120,27 @@ final class IpnController
                 'payment_method' => $code,
                 'client_ip' => $request->getClientIp(),
                 'reason' => $exception->getMessage(),
+                ...$this->untrustedBodyContext($request->getContent()),
             ]);
 
             return new Response('Invalid notification.', Response::HTTP_BAD_REQUEST);
         }
 
         $message = $resolve->getMessage();
-        $payment = $this->findPayment($message->orderRef);
+        $payment = $this->findPayment($message->orderRef, $request->getContent());
 
         if (!$payment instanceof PaymentInterface) {
+            // A törzs itt már ÁTMENT az aláírás-ellenőrzésen — hiteles, tehát
+            // korlátozás nélkül naplózható. Ez az az eset, ahol egy teljes
+            // törzs a leghasznosabb: nincs `Payment`, amihez a hibát
+            // köthetnénk, tehát a strukturált mezők (`order_ref`,
+            // `transaction_id`) önmagukban nem mondják meg, mit is küldött
+            // pontosan a SimplePay.
             $this->logger->error('SimplePay értesítés érkezett ismeretlen rendelésre.', [
                 'event' => 'simplepay.ipn.unknown_order',
                 'order_ref' => $message->orderRef,
                 'transaction_id' => $message->transactionId,
+                'body' => $request->getContent(),
             ]);
         }
 
@@ -140,6 +162,15 @@ final class IpnController
         }
 
         // Ide nem szabadna eljutni: a NotifyAction mindig reply-t dob.
+        //
+        // A törzs itt SZÁNDÉKOSAN nem kerül a naplóba. Ha idáig eljutottunk,
+        // a `ResolveSimplePayIpn` már sikeresen hitelesítette és feldolgozta
+        // az üzenetet, és a `Notify` is lefutott anélkül, hogy elakadt volna
+        // — az anomália nem a törzs TARTALMÁVAL van (azt a `$message` már
+        // teljesen leírja), hanem a NotifyAction (fagyasztott, 2. réteg)
+        // viselkedésével. Ez pontosan az a helyzet, amit a feladat a
+        // sikeres ágra ír elő: a strukturált mezők önmagukban elmondják a
+        // lényeget, a törzs újbóli naplózása itt zaj lenne.
         $this->logger->error('A SimplePay NotifyAction nem adott visszaigazolást.', [
             'event' => 'simplepay.ipn.no_confirmation',
             'order_ref' => $message->orderRef,
@@ -148,7 +179,7 @@ final class IpnController
         return new Response('', Response::HTTP_INTERNAL_SERVER_ERROR);
     }
 
-    private function findPayment(string $orderRef): ?PaymentInterface
+    private function findPayment(string $orderRef, string $body): ?PaymentInterface
     {
         $reference = OrderReference::tryParse($orderRef);
 
@@ -166,15 +197,39 @@ final class IpnController
         // kell a megtalált fizetés rendelésével. Enélkül egy elgépelt vagy
         // átfedő azonosító idegen rendelést módosíthatna.
         if ($payment->getOrder()?->getNumber() !== $reference->orderNumber) {
+            // A törzs itt is hiteles — ugyanúgy, mint az `unknown_order` ágon
+            // — hiszen ide csak sikeres aláírás-ellenőrzés UTÁN jutunk el.
+            // Korlátozás nélkül naplózzuk: a teljes törzs olyan mezőket is
+            // tartalmaz (pl. `transactionId`, `merchant`), amiket a fenti
+            // `order_ref` és `payment_id` önmagában nem ad vissza, pedig épp
+            // egy azonosító-eltérés kivizsgálásához kellenek.
             $this->logger->error('A SimplePay hivatkozás rendelésszáma nem egyezik a megtalált fizetésével.', [
                 'event' => 'simplepay.ipn.order_mismatch',
                 'order_ref' => $orderRef,
                 'payment_id' => $reference->paymentId,
+                'body' => $body,
             ]);
 
             return null;
         }
 
         return $payment;
+    }
+
+    /**
+     * Naplózható kontextus egy MÉG NEM hitelesített (aláírás nélküli vagy
+     * hamis aláírású) törzshöz: a `body_excerpt` a `UNTRUSTED_BODY_EXCERPT_LIMIT`
+     * bájtra vágott törzs, a `body_length` pedig a törzs VALÓDI, vágás
+     * előtti hossza — enélkül egy csonkolt bejegyzés hazudna arról, mekkora
+     * volt az eredeti kérés.
+     *
+     * @return array{body_excerpt: string, body_length: int}
+     */
+    private function untrustedBodyContext(string $body): array
+    {
+        return [
+            'body_excerpt' => substr($body, 0, self::UNTRUSTED_BODY_EXCERPT_LIMIT),
+            'body_length' => strlen($body),
+        ];
     }
 }
