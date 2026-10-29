@@ -142,6 +142,46 @@ final class ContainerCompilationTest extends TestCase
         return $ids;
     }
 
+    /**
+     * A Payum a `payum.action` / `payum.extension` taggel jelölt
+     * szolgáltatásokat `"@id"` szövegként teszi a gateway-konfigurációba
+     * (`BuildConfigsPass`), és a `ContainerAwareCoreGatewayFactory` csak akkor
+     * cseréli le őket a példányra, ha `$container->has($id)` igaz. Privát
+     * szolgáltatásra ez hamis, így a szöveg jut a `Gateway::addAction()`-be
+     * (TypeError) — egy adatbázisból épülő Sylius gateway fel sem épülhet.
+     * Ezért ez a teszt NEM teszi publikussá a plugin szolgáltatásait.
+     */
+    public function testPayumTaggedServicesAreReachableByIdAfterCompilation(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.project_dir', sys_get_temp_dir());
+
+        foreach (self::EXTERNAL_SERVICES as $id => $class) {
+            if (self::DECORATED_INTERFACE_ID === $id) {
+                $container->register($id, MockHttpClient::class)->setPublic(true);
+
+                continue;
+            }
+
+            $container->register($id, $class)->setSynthetic(true)->setPublic(true);
+        }
+
+        new CodeConjureSyliusSimplePayExtension()->load([], $container);
+
+        $tagged = array_merge(
+            array_keys($container->findTaggedServiceIds('payum.action')),
+            array_keys($container->findTaggedServiceIds('payum.extension')),
+        );
+
+        self::assertNotSame([], $tagged, 'A kiterjesztés egyetlen Payum-szolgáltatást sem töltött be.');
+
+        $container->compile();
+
+        foreach ($tagged as $id) {
+            self::assertTrue($container->has($id), sprintf('A(z) %s nem érhető el azonosító alapján — a Payum nem tudja feloldani.', $id));
+        }
+    }
+
     public function testEveryServiceCanBeInstantiatedWhenTheApplicationProvidesEverything(): void
     {
         $container = $this->compiledContainer(withLogger: true);
