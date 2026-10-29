@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CodeConjure\SyliusSimplePayPlugin\Checkout;
 
 use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
+use CodeConjure\SyliusSimplePayPlugin\Exception\PaymentNotRestartableException;
 use Doctrine\ORM\EntityManagerInterface;
 use Payum\Core\Payum;
 use Payum\Core\Request\GetHumanStatus;
@@ -27,6 +28,11 @@ use Symfony\Component\HttpKernel\Event\ExceptionEvent;
  * A figyelő ezért nem javít semmit az állapoton: lekérdezi az igazit
  * (`Sync`), frissíti a Sylius fizetés-státuszt (`GetHumanStatus`), és a token
  * `afterUrl`-jére irányít — oda, ahová a sikeres capture is vitte volna.
+ *
+ * Ugyanígy kezeli a `PaymentNotRestartableException`-t: egy lejárt helyi
+ * állapotú fizetésre a SimplePay szerint még folyamatban lévő (vagy le nem
+ * kérdezhető) tranzakció miatt nem indul új `/start`, és a vevő a Sylius
+ * oldalán a függő állapotot látja.
  */
 final class PaymentAlreadySettledListener
 {
@@ -70,7 +76,6 @@ final class PaymentAlreadySettledListener
             $gateway = $this->payum->getGateway($token->getGatewayName());
             $gateway->execute(new Sync($token));
             $gateway->execute(new GetHumanStatus($token));
-            $this->entityManager->flush();
         } catch (\Throwable $exception) {
             // A vevő böngészője nem a hibakezelés helye. Az állapotot az IPN
             // úgyis rendbe hozza; a vevőt engedjük a Sylius oldalára.
@@ -80,8 +85,21 @@ final class PaymentAlreadySettledListener
             ]);
         }
 
-        $this->logger->info('Egy már lezárult fizetés capture-címét töltötték újra.', [
+        // Külön, a Sync sikerétől függetlenül: a ForceReconvert kiterjesztés
+        // Sync-je már a memóriába írta a friss állapotot, ami nem veszhet el.
+        try {
+            $this->entityManager->flush();
+        } catch (\Throwable $exception) {
+            $this->logger->error('A fizetés friss állapotának mentése nem sikerült.', [
+                'event' => 'simplepay.capture.already_settled_flush_failed',
+                'reason' => $exception->getMessage(),
+            ]);
+        }
+
+        $this->logger->info('Egy lezárult vagy újra nem indítható fizetés capture-címét töltötték újra.', [
             'event' => 'simplepay.capture.already_settled',
+            'exception' => $event->getThrowable()::class,
+            'reason' => $event->getThrowable()->getMessage(),
             'after_url' => $token->getAfterUrl(),
         ]);
 
@@ -95,7 +113,7 @@ final class PaymentAlreadySettledListener
     private function isAlreadySettled(\Throwable $throwable): bool
     {
         for ($current = $throwable; null !== $current; $current = $current->getPrevious()) {
-            if ($current instanceof PaymentAlreadySettledException) {
+            if ($current instanceof PaymentAlreadySettledException || $current instanceof PaymentNotRestartableException) {
                 return true;
             }
         }
