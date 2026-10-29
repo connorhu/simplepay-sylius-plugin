@@ -166,6 +166,10 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
                 $request->markNew();
 
                 return;
+            } catch (\LogicException $exception) {
+                // Programozási hiba, nem SimplePay-állapot: ne rejtse el
+                // egy „nem kérdezhető le” átirányítás.
+                throw $exception;
             } catch (\Throwable $exception) {
                 throw PaymentNotRestartableException::stateUnknown($exception);
             }

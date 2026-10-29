@@ -96,8 +96,10 @@ final class PaymentAlreadySettledListener
             ]);
         }
 
-        $this->logger->info('Egy már lezárult fizetés capture-címét töltötték újra.', [
+        $this->logger->info('Egy lezárult vagy újra nem indítható fizetés capture-címét töltötték újra.', [
             'event' => 'simplepay.capture.already_settled',
+            'exception' => $event->getThrowable()::class,
+            'reason' => $event->getThrowable()->getMessage(),
             'after_url' => $token->getAfterUrl(),
         ]);
 
