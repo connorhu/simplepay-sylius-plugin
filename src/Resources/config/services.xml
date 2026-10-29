@@ -8,8 +8,13 @@
         <!-- A payum.action tag "factory" attribútuma korlátozza az actiont
              a simplepay gateway-re. Enélkül MINDEN gateway megkapná a
              Convert actionünket, és egy PayPal fizetés is SimplePay
-             payloaddá alakulna. -->
-        <service id="CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction">
+             payloaddá alakulna.
+             public="true": a Payum "@id" szövegként kapja a taggelt
+             szolgáltatásokat, és a ContainerAwareCoreGatewayFactory csak
+             $container->has($id) esetén oldja fel őket — privát
+             szolgáltatásra ez hamis, és a DB-ből épülő gateway TypeError-ral
+             elbukik (ugyanezért publikusak a Sylius saját Payum actionjei). -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction" public="true">
             <argument type="service" id="router"/>
             <tag name="payum.action" factory="simplepay"/>
         </service>
@@ -21,8 +26,9 @@
              halott tranzakcióra (CANCELLED, TIMEOUT, NOTAUTHORIZED, FRAUD)
              ez sosem igaz. Ez a kiterjesztés a beágyazott GetStatus-t
              NEW-ra jelöli át ilyenkor, hogy a vendor kód a Convert-et
-             mégis lefuttassa. Lásd az osztály docblockját. -->
-        <service id="CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension">
+             mégis lefuttassa. Lásd az osztály docblockját.
+             public="true": ugyanazért, mint a Convert actionnél fent. -->
+        <service id="CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension" public="true">
             <tag name="payum.extension" factory="simplepay"/>
         </service>
 
