@@ -8,6 +8,7 @@ use CodeConjure\SimplePay\TransactionStatus;
 use CodeConjure\SimplePayPayum\Details;
 use CodeConjure\SimplePayPayum\Exception\TransactionNotFoundException;
 use CodeConjure\SimplePayPayum\Model\TransactionState;
+use CodeConjure\SyliusSimplePayPlugin\Exception\PaymentNotRestartableException;
 use Payum\Core\Bridge\Spl\ArrayObject;
 use Payum\Core\Extension\Context;
 use Payum\Core\Extension\ExtensionInterface;
@@ -69,14 +70,22 @@ use Sylius\Component\Payment\Model\PaymentInterface;
  * ELAVULT FÜGGŐ ÁLLAPOT: egy lejárt, de NEM végleges helyi állapot
  * (INIT/INPAYMENT/AUTHORIZED/INFRAUD) elavult lehet — a vevő közben
  * fizethetett, és az IPN meg a visszatérés is elveszhetett. Ezért
- * újraindítás előtt `Sync` (`/query`) fut, és a FRISS állapot dönt: ha a
- * SimplePay szerint lezárult, nincs `NEW`, a frozen `CaptureAction` a lezárt
- * ágon `PaymentAlreadySettledException`-t dob (nincs második terhelés). Ha a
- * SimplePay nem ismeri a tranzakciót (`TransactionNotFoundException`), az
- * nem terhelhetett — újraindulhat. Minden más lekérdezési hiba TOVÁBB
- * DOBÓDIK: bizonytalan állapotra nem indítunk új `/start`-ot. A végleges
- * halott állapotokat (CANCELLED/TIMEOUT/NOTAUTHORIZED/FRAUD) nem kérdezzük
- * le: azok a SimplePaynél sem válhatnak lezárttá.
+ * újraindítás előtt `Sync` (`/query`) fut, és a FRISS állapot dönt:
+ *
+ *   - lezárult → nincs `NEW`, a frozen `CaptureAction` a lezárt ágon
+ *     `PaymentAlreadySettledException`-t dob (nincs második terhelés);
+ *   - halott végleges vagy INIT (a vevő el sem kezdett fizetni) → újraindulhat;
+ *   - még folyamatban (INPAYMENT/AUTHORIZED/INFRAUD: az összeg lefoglalva
+ *     lehet, a SimplePay még lezárhatja) → `PaymentNotRestartableException`;
+ *   - a SimplePay nem ismeri (`TransactionNotFoundException`) → nem
+ *     terhelhetett, újraindulhat;
+ *   - bármely más lekérdezési hiba → `PaymentNotRestartableException`:
+ *     bizonytalan állapotra nem indul új `/start`.
+ *
+ * A `PaymentNotRestartableException`-t a `PaymentAlreadySettledListener`
+ * a Sylius szokásos oldalára irányítja. A végleges halott állapotokat
+ * (CANCELLED/TIMEOUT/NOTAUTHORIZED/FRAUD) nem kérdezzük le: azok a
+ * SimplePaynél sem válhatnak lezárttá.
  *
  * MIÉRT NEM SZIVÁROG KI a hatás máshova: a `Sylius\Bundle\PayumBundle\
  * Extension\UpdatePaymentStateExtension` ugyanezt a mintát használja saját
@@ -152,15 +161,27 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
         if (!$state->status->isFinal()) {
             // Elavult függő állapot: a SimplePay dönt (lásd a docblockot).
             try {
-                $state = $this->syncedState($context, $request, $model);
+                $state = $this->syncedState($context, $request);
             } catch (TransactionNotFoundException) {
                 $request->markNew();
 
                 return;
+            } catch (\Throwable $exception) {
+                throw PaymentNotRestartableException::stateUnknown($exception);
             }
 
-            if (null === $state->status || self::isSettled($state->status) || $state->isLive(new \DateTimeImmutable())) {
+            $fresh = $state->status;
+
+            if (null === $fresh) {
+                throw new \LogicException('A Sync után a SimplePay állapotnak ismertnek kell lennie.');
+            }
+
+            if (self::isSettled($fresh)) {
                 return;
+            }
+
+            if (TransactionStatus::Init !== $fresh && !$fresh->isFinal()) {
+                throw PaymentNotRestartableException::inProgress($fresh);
             }
         }
 
@@ -168,29 +189,26 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
     }
 
     /**
-     * A `Sync`-et a Sylius fizetésen (a `GetStatus` ELSŐ modelljén) futtatjuk,
-     * ha az elérhető: a Sylius `ExecuteSameRequestWithPaymentDetailsAction`
-     * ekkor a friss állapotot visszaírja a fizetés details-ébe. A `$model`
-     * (ArrayObject) a beágyazott `GetStatus` után már leválasztott másolat —
-     * a hídja `finally` ága ELŐBB futott le, mint ez a kiterjesztés —, tehát
-     * az abba írt `Sync`-eredményt a következő `Capture` nem látná, és a
-     * frozen `CaptureAction` mégis új `/start`-ot indítana.
-     *
-     * @param \ArrayAccess<array-key, mixed> $model
+     * A `Sync`-et a Sylius fizetésen (a `GetStatus` ELSŐ modelljén) futtatjuk:
+     * a Sylius `ExecuteSameRequestWithPaymentDetailsAction` ekkor a friss
+     * állapotot visszaírja a fizetés details-ébe, és a következő `Capture`
+     * azt olvassa. A beágyazott `GetStatus` ArrayObject-je ehhez nem jó: a
+     * hídja `finally` ága ELŐBB futott le, mint ez a kiterjesztés, tehát az
+     * abba írt eredményt senki nem látná, és a frozen `CaptureAction` mégis új
+     * `/start`-ot indítana. A `CapturePaymentAction` mindig a fizetéssel
+     * hívja a `GetStatus`-t; ha mégsem, hangosan elbukunk.
      */
-    private function syncedState(Context $context, GetStatusInterface $request, \ArrayAccess $model): TransactionState
+    private function syncedState(Context $context, GetStatusInterface $request): TransactionState
     {
         $payment = $request instanceof Generic ? $request->getFirstModel() : null;
 
-        if ($payment instanceof PaymentInterface) {
-            $context->getGateway()->execute(new Sync($payment));
-
-            return Details::fromModel(ArrayObject::ensureArrayObject($payment->getDetails()))->state();
+        if (!$payment instanceof PaymentInterface) {
+            throw new \LogicException('A GetStatus első modellje nem Sylius fizetés; a Sync eredménye nem írható vissza.');
         }
 
-        $context->getGateway()->execute(new Sync($model));
+        $context->getGateway()->execute(new Sync($payment));
 
-        return Details::fromModel($model)->state();
+        return Details::fromModel(ArrayObject::ensureArrayObject($payment->getDetails()))->state();
     }
 
     /**

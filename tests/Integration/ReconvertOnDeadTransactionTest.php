@@ -17,6 +17,7 @@ use CodeConjure\SimplePayPayum\Api;
 use CodeConjure\SimplePayPayum\Details;
 use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
 use CodeConjure\SyliusSimplePayPlugin\Action\ConvertPaymentAction;
+use CodeConjure\SyliusSimplePayPlugin\Exception\PaymentNotRestartableException;
 use CodeConjure\SyliusSimplePayPlugin\Extension\ForceReconvertOnDeadTransactionExtension;
 use Http\Client\Exception\NetworkException;
 use Http\Mock\Client as MockHttpClient;
@@ -99,7 +100,12 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         ];
 
         foreach ($pending as $status) {
-            yield sprintf('%s, LEJÁRT fizetőoldal (R32 új esete)', $status->value) => [$status, 'expired', true, true, false];
+            // Lejárt függő állapot: a /query dönt. A mátrixban a SimplePay
+            // ugyanazt a státuszt adja vissza — INIT-re (a vevő el sem
+            // kezdett fizetni) újraindul, a folyamatban lévőkre NEM
+            // (PaymentNotRestartableException, lásd a külön teszteket).
+            $restart = TransactionStatus::Init === $status;
+            yield sprintf('%s, LEJÁRT fizetőoldal (R32 új esete)', $status->value) => [$status, 'expired', $restart, $restart, false];
             yield sprintf('%s, MÉG ÉLŐ fizetőoldal', $status->value) => [$status, 'live', false, false, false];
         }
 
@@ -136,6 +142,8 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         bool $expectSettledException,
     ): void {
         $result = $this->driveCapture($status, $timeoutMode);
+
+        self::assertSame(!$expectConvert && !$expectSettledException && 'expired' === $timeoutMode && null !== $status && !$status->isFinal(), $result->notRestartableThrown, 'A PaymentNotRestartableException dobása nem egyezik a várttal.');
 
         self::assertSame($expectConvert, $result->convertRan, 'A Convert futása nem egyezik a várttal.');
         self::assertSame($expectStart, $result->startRequestSent, 'A /start hívás megtörténte nem egyezik a várttal.');
@@ -184,13 +192,55 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         }
     }
 
-    #[DataProvider('pendingStatuses')]
-    public function testAnExpiredPendingTransactionIsQueriedBeforeARestart(TransactionStatus $status): void
+    public function testAnExpiredInitTransactionIsQueriedOnceThenRestarted(): void
     {
-        $result = $this->driveCapture($status, 'expired', 'same');
+        $result = $this->driveCapture(TransactionStatus::Init, 'expired', 'same');
 
-        self::assertTrue($result->queryRequestSent, 'Újraindítás előtt /query kell.');
-        self::assertTrue($result->startRequestSent, 'Ha a SimplePay szerint is függőben van, újraindulhat.');
+        self::assertSame(1, $result->queryRequestCount, 'Újraindítás előtt pontosan egy /query kell.');
+        self::assertTrue($result->startRequestSent, 'INIT: a vevő el sem kezdett fizetni — újraindulhat.');
+    }
+
+    /**
+     * @return iterable<string, array{0: TransactionStatus}>
+     */
+    public static function inProgressStatuses(): iterable
+    {
+        foreach ([TransactionStatus::InPayment, TransactionStatus::Authorized, TransactionStatus::InFraud] as $status) {
+            yield $status->value => [$status];
+        }
+    }
+
+    /**
+     * Folyamatban lévő tranzakció (fizetés alatt, engedélyezve, csalásvizsgálat
+     * alatt): az összeg lefoglalva lehet, és a SimplePay még lezárhatja —
+     * egy új /start második terhelés volna.
+     */
+    #[DataProvider('inProgressStatuses')]
+    public function testATransactionStillInProgressAtSimplePayIsNeverRestarted(TransactionStatus $status): void
+    {
+        foreach ($this->pendingStatusesList() as $stored) {
+            $result = $this->driveCapture($stored, 'expired', 'in_progress:' . $status->value);
+
+            self::assertSame(1, $result->queryRequestCount);
+            self::assertFalse($result->convertRan);
+            self::assertFalse($result->startRequestSent, sprintf('%s → %s: nem indulhat új /start.', $stored->value, $status->value));
+            self::assertTrue($result->notRestartableThrown);
+        }
+    }
+
+    /** @return list<TransactionStatus> */
+    private function pendingStatusesList(): array
+    {
+        return [TransactionStatus::Init, TransactionStatus::InPayment, TransactionStatus::Authorized, TransactionStatus::InFraud];
+    }
+
+    public function testAPendingTransactionThatTheQueryShowsDeadIsRestarted(): void
+    {
+        $result = $this->driveCapture(TransactionStatus::InPayment, 'expired', 'in_progress:TIMEOUT');
+
+        self::assertSame(1, $result->queryRequestCount);
+        self::assertTrue($result->convertRan);
+        self::assertTrue($result->startRequestSent, 'A SimplePay szerint halott tranzakció helyett új indulhat.');
     }
 
     #[DataProvider('pendingStatuses')]
@@ -215,13 +265,12 @@ final class ReconvertOnDeadTransactionTest extends TestCase
 
     public function testAFailedQueryNeverLeadsToARestart(): void
     {
-        $this->expectException(TransportException::class);
+        $result = $this->driveCapture(TransactionStatus::InPayment, 'expired', 'transport_error');
 
-        try {
-            $this->driveCapture(TransactionStatus::InPayment, 'expired', 'transport_error');
-        } finally {
-            self::assertFalse($this->lastStartRequestSent, 'Sikertelen /query után nem indulhat új /start.');
-        }
+        self::assertSame(1, $result->queryRequestCount, 'A kivétel után a kiterjesztés nem küldhet második /query-t.');
+        self::assertFalse($result->startRequestSent, 'Sikertelen /query után nem indulhat új /start.');
+        self::assertTrue($result->notRestartableThrown);
+        self::assertInstanceOf(TransportException::class, $result->notRestartablePrevious);
     }
 
     public function testADeadFinalTransactionIsRestartedWithoutAQuery(): void
@@ -232,10 +281,8 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         self::assertTrue($result->startRequestSent);
     }
 
-    private bool $lastStartRequestSent = false;
-
     /**
-     * @param 'auto'|'same'|'finished'|'not_found'|'transport_error'|'none' $queryMode
+     * @param string $queryMode 'auto'|'same'|'finished'|'not_found'|'transport_error'|'none'|'in_progress:<STATUS>'
      *                                                                         'auto': a mátrixhoz — lejárt, nem végleges állapotnál 'same', egyébként 'none'
      */
     private function driveCapture(?TransactionStatus $status, string $timeoutMode, string $queryMode = 'auto'): CaptureResult
@@ -286,6 +333,7 @@ final class ReconvertOnDeadTransactionTest extends TestCase
             'not_found' => $mockHttpClient->addResponse($this->signedQueryResponse(null)),
             'transport_error' => $mockHttpClient->addException(new NetworkException('a hálózat nem érhető el', new \Nyholm\Psr7\Request('POST', 'https://sandbox.simplepay.hu/payment/v2/query'))),
             'none' => null,
+            default => $mockHttpClient->addResponse($this->signedQueryResponse(TransactionStatus::fromApi(substr($queryMode, strlen('in_progress:'))))),
         };
 
         $mockHttpClient->addResponse($this->signedStartResponse());
@@ -325,7 +373,7 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         $request->setModel($payment);
 
         $settledExceptionThrown = false;
-        $this->lastStartRequestSent = false;
+        $notRestartable = null;
 
         // EGYETLEN `\Throwable`-ágra van szükség — a PHPStan a Payum
         // dinamikus (reflection-alapú) akció-feloldását statikusan nem
@@ -336,13 +384,9 @@ final class ReconvertOnDeadTransactionTest extends TestCase
         try {
             $gateway->execute($request);
         } catch (\Throwable $exception) {
-            if ($exception instanceof TransportException) {
-                $this->lastStartRequestSent = [] !== $this->requestsTo($mockHttpClient, 'start');
-
-                throw $exception;
-            }
-
-            if ($exception instanceof PaymentAlreadySettledException) {
+            if ($exception instanceof PaymentNotRestartableException) {
+                $notRestartable = $exception;
+            } elseif ($exception instanceof PaymentAlreadySettledException) {
                 $settledExceptionThrown = true;
             } elseif (!$exception instanceof HttpRedirect) {
                 // Vagy a meglévő élő fizetőoldalra irányít vissza (nincs
@@ -370,6 +414,9 @@ final class ReconvertOnDeadTransactionTest extends TestCase
             orderRefSent: $orderRefSent,
             settledExceptionThrown: $settledExceptionThrown,
             queryRequestSent: [] !== $this->requestsTo($mockHttpClient, 'query'),
+            queryRequestCount: count($this->requestsTo($mockHttpClient, 'query')),
+            notRestartableThrown: null !== $notRestartable,
+            notRestartablePrevious: $notRestartable?->getPrevious(),
         );
     }
 
@@ -575,6 +622,9 @@ final readonly class CaptureResult
         public ?string $orderRefSent,
         public bool $settledExceptionThrown,
         public bool $queryRequestSent = false,
+        public int $queryRequestCount = 0,
+        public bool $notRestartableThrown = false,
+        public ?\Throwable $notRestartablePrevious = null,
     ) {
     }
 }

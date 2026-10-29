@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace CodeConjure\SyliusSimplePayPlugin\Tests\Unit\Checkout;
 
+use CodeConjure\SimplePay\TransactionStatus;
 use CodeConjure\SimplePayPayum\Exception\PaymentAlreadySettledException;
 use CodeConjure\SyliusSimplePayPlugin\Checkout\PaymentAlreadySettledListener;
+use CodeConjure\SyliusSimplePayPlugin\Exception\PaymentNotRestartableException;
 use Doctrine\ORM\EntityManagerInterface;
 use Payum\Core\GatewayInterface;
 use Payum\Core\Payum;
@@ -165,6 +167,37 @@ final class PaymentAlreadySettledListenerTest extends TestCase
         $response = $event->getResponse();
         self::assertInstanceOf(RedirectResponse::class, $response);
         self::assertSame(self::AFTER_URL, $response->getTargetUrl());
+    }
+
+    public function testAPaymentThatMustNotBeRestartedAlsoGoesToTheAfterUrl(): void
+    {
+        // A ForceReconvert kiterjesztés dobja, ha a SimplePay szerint a
+        // tranzakció még folyamatban van, vagy az állapota nem kérdezhető le:
+        // új /start helyett a Sylius szokásos oldala mutatja a függő állapotot.
+        foreach ([
+            PaymentNotRestartableException::inProgress(TransactionStatus::InPayment),
+            PaymentNotRestartableException::stateUnknown(new \RuntimeException('hálózati hiba')),
+        ] as $exception) {
+            $executed = [];
+            $event = $this->event($exception);
+
+            $this->listener($executed)($event);
+
+            $response = $event->getResponse();
+            self::assertInstanceOf(RedirectResponse::class, $response);
+            self::assertSame(self::AFTER_URL, $response->getTargetUrl());
+        }
+    }
+
+    public function testItFlushesEvenWhenTheSyncFails(): void
+    {
+        // A kiterjesztés Sync-je már a memóriába írta a friss állapotot;
+        // egy sikertelen második Sync miatt az nem veszhet el.
+        $executed = [];
+        $entityManager = $this->createMock(EntityManagerInterface::class);
+        $entityManager->expects($this->once())->method('flush');
+
+        $this->listener($executed, syncThrows: new \RuntimeException('hálózati hiba'), entityManager: $entityManager)($this->event($this->settled()));
     }
 
     public function testWithoutAResolvableTokenTheOriginalExceptionStands(): void
