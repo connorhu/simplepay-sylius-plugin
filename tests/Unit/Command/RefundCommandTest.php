@@ -137,7 +137,7 @@ final class RefundCommandTest extends TestCase
         );
 
         $application = new Application();
-        $application->add($command);
+        $application->addCommand($command);
 
         return new CommandTester($application->find('simplepay:refund'));
     }
