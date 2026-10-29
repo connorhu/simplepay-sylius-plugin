@@ -83,6 +83,14 @@ IPN-cím mező — a `start` kérés ezt nem tudja befolyásolni.
 Az `r` aláírt, tehát nem hamisítható — de csak azt mondja meg, **mit lát a
 vásárló**, nem azt, hogy a pénz megérkezett-e.
 
+**Újraindítás előtt `/query`.** Ha a vevő egy lejárt, de nem végleges
+(INIT/INPAYMENT/AUTHORIZED/INFRAUD) tranzakciójú fizetés capture-címét tölti
+újra, a plugin új `/start` előtt lekérdezi a SimplePay-t: ha a tranzakció
+közben lezárult (pl. az IPN és a visszatérés is elveszett), nincs új
+tranzakció, a vevő a Sylius oldalára kerül. Ha a SimplePay nem ismeri a
+tranzakciót, újraindul; bármely más lekérdezési hiba továbbdobódik —
+bizonytalan állapotra nem indul második terhelés.
+
 ## Jóváírás
 
 ```bash

@@ -6,10 +6,16 @@ namespace CodeConjure\SyliusSimplePayPlugin\Extension;
 
 use CodeConjure\SimplePay\TransactionStatus;
 use CodeConjure\SimplePayPayum\Details;
+use CodeConjure\SimplePayPayum\Exception\TransactionNotFoundException;
+use CodeConjure\SimplePayPayum\Model\TransactionState;
+use Payum\Core\Bridge\Spl\ArrayObject;
 use Payum\Core\Extension\Context;
 use Payum\Core\Extension\ExtensionInterface;
+use Payum\Core\Request\Generic;
 use Payum\Core\Request\GetStatusInterface;
+use Payum\Core\Request\Sync;
 use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
+use Sylius\Component\Payment\Model\PaymentInterface;
 
 /**
  * A `Convert` csak akkor fut újra a Sylius `CapturePaymentAction`-jében, ha
@@ -60,6 +66,18 @@ use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
  * A HARD LIMIT VÁLTOZATLAN: egy lezárt fizetésre ez az osztály SOSEM
  * jelöli `NEW`-nak a `GetStatus`-t.
  *
+ * ELAVULT FÜGGŐ ÁLLAPOT: egy lejárt, de NEM végleges helyi állapot
+ * (INIT/INPAYMENT/AUTHORIZED/INFRAUD) elavult lehet — a vevő közben
+ * fizethetett, és az IPN meg a visszatérés is elveszhetett. Ezért
+ * újraindítás előtt `Sync` (`/query`) fut, és a FRISS állapot dönt: ha a
+ * SimplePay szerint lezárult, nincs `NEW`, a frozen `CaptureAction` a lezárt
+ * ágon `PaymentAlreadySettledException`-t dob (nincs második terhelés). Ha a
+ * SimplePay nem ismeri a tranzakciót (`TransactionNotFoundException`), az
+ * nem terhelhetett — újraindulhat. Minden más lekérdezési hiba TOVÁBB
+ * DOBÓDIK: bizonytalan állapotra nem indítunk új `/start`-ot. A végleges
+ * halott állapotokat (CANCELLED/TIMEOUT/NOTAUTHORIZED/FRAUD) nem kérdezzük
+ * le: azok a SimplePaynél sem válhatnak lezárttá.
+ *
  * MIÉRT NEM SZIVÁROG KI a hatás máshova: a `Sylius\Bundle\PayumBundle\
  * Extension\UpdatePaymentStateExtension` ugyanezt a mintát használja saját
  * hatókör-szűkítésre — a `getPrevious()` verem-mélységét nézi, és csak a
@@ -82,6 +100,13 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
 
     public function onPostExecute(Context $context): void
     {
+        // A Payum kivétel esetén is meghívja az `onPostExecute`-et (a
+        // külső szinteken is) — ilyenkor nincs mit eldönteni, és egy
+        // ismételt `Sync` második `/query`-t küldene.
+        if (null !== $context->getException()) {
+            return;
+        }
+
         $request = $context->getRequest();
 
         if (!$request instanceof GetStatusInterface) {
@@ -124,7 +149,48 @@ final class ForceReconvertOnDeadTransactionExtension implements ExtensionInterfa
             return;
         }
 
+        if (!$state->status->isFinal()) {
+            // Elavult függő állapot: a SimplePay dönt (lásd a docblockot).
+            try {
+                $state = $this->syncedState($context, $request, $model);
+            } catch (TransactionNotFoundException) {
+                $request->markNew();
+
+                return;
+            }
+
+            if (null === $state->status || self::isSettled($state->status) || $state->isLive(new \DateTimeImmutable())) {
+                return;
+            }
+        }
+
         $request->markNew();
+    }
+
+    /**
+     * A `Sync`-et a Sylius fizetésen (a `GetStatus` ELSŐ modelljén) futtatjuk,
+     * ha az elérhető: a Sylius `ExecuteSameRequestWithPaymentDetailsAction`
+     * ekkor a friss állapotot visszaírja a fizetés details-ébe. A `$model`
+     * (ArrayObject) a beágyazott `GetStatus` után már leválasztott másolat —
+     * a hídja `finally` ága ELŐBB futott le, mint ez a kiterjesztés —, tehát
+     * az abba írt `Sync`-eredményt a következő `Capture` nem látná, és a
+     * frozen `CaptureAction` mégis új `/start`-ot indítana.
+     *
+     * @param \ArrayAccess<array-key, mixed> $model
+     */
+    private function syncedState(Context $context, GetStatusInterface $request, \ArrayAccess $model): TransactionState
+    {
+        $payment = $request instanceof Generic ? $request->getFirstModel() : null;
+
+        if ($payment instanceof PaymentInterface) {
+            $context->getGateway()->execute(new Sync($payment));
+
+            return Details::fromModel(ArrayObject::ensureArrayObject($payment->getDetails()))->state();
+        }
+
+        $context->getGateway()->execute(new Sync($model));
+
+        return Details::fromModel($model)->state();
     }
 
     /**
