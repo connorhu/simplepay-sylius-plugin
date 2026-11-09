@@ -54,7 +54,7 @@ final class ServiceDefinitionTest extends TestCase
     {
         self::assertTrue(
             $this->container()->hasDefinition($class),
-            sprintf('A(z) %s nincs bekötve a services.xml-be.', $class),
+            sprintf('A(z) %s nincs bekötve a services.php-be.', $class),
         );
     }
 
@@ -69,10 +69,10 @@ final class ServiceDefinitionTest extends TestCase
     /**
      * R32 (2. találat) regresszió-védelem: az átvizsgálás három olyan
      * mutációt talált, ami az összes tesztet zölden hagyta —
-     *   1. a `<service>` blokk törlése a services.xml-ből (→ innen a
+     *   1. a `$services->set(...)` blokk törlése a services.php-ből (→ innen a
      *      `testEveryPublicPieceIsRegistered` bukik, mert a kiterjesztés
      *      szerepel a `services()` listában),
-     *   2. a `factory="simplepay"` cseréje `all="true"`-ra (→ EZT a
+     *   2. a `'factory' => 'simplepay'` cseréje `'all' => true`-ra (→ EZT a
      *      tesztet bukja),
      *   3. a hívó-kontextus őr `if (false)`-ra cserélése (→ a lentebbi
      *      `testTheForceReconvertExtensionNeverActsOnATopLevelGetStatus`

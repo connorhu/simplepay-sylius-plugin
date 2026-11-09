@@ -10,12 +10,13 @@ permissions:
 
 jobs:
     checks:
-        name: "Tesztek és statikus ellenőrzés (PHP ${{ matrix.php }})"
+        name: "Tesztek és statikus ellenőrzés (PHP ${{ matrix.php }}, Symfony ${{ matrix.symfony }})"
         runs-on: ubuntu-latest
         strategy:
             fail-fast: false
             matrix:
                 php: ['8.4']
+                symfony: ['7.4.*', '8.1.*']
         steps:
             - uses: actions/checkout@v4
 
@@ -23,6 +24,18 @@ jobs:
               with:
                   php-version: ${{ matrix.php }}
                   coverage: none
+
+            # A Sylius a Symfony-t közvetve húzza be, ezért a keretrendszert
+            # és a kernelt is rögzítjük, nem csak a közvetlen függőségeket.
+            - name: Symfony ${{ matrix.symfony }} rögzítése
+              run: >-
+                  composer require --no-update
+                  "symfony/dependency-injection:${{ matrix.symfony }}"
+                  "symfony/http-client:${{ matrix.symfony }}"
+                  "symfony/framework-bundle:${{ matrix.symfony }}"
+                  "symfony/http-kernel:${{ matrix.symfony }}"
+                  && composer require --dev --no-update
+                  "symfony/console:${{ matrix.symfony }}"
 
             - uses: ramsey/composer-install@v3
 

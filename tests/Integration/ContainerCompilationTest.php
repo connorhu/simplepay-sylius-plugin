@@ -20,26 +20,26 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\Routing\RouterInterface;
 
 /**
- * A `services.xml` és a konstruktorok együttes ellenőrzése.
+ * A `services.php` és a konstruktorok együttes ellenőrzése.
  *
  * A `ServiceDefinitionTest` csak azt nézi, MI van deklarálva. Ez a teszt
  * lefordítja a konténert és példányosít: itt bukik ki az a fajta hiba, ami a
- * Payum-csomagban a bundle bootolását akadályozta meg — a `services.xml`
- * `on-invalid="null"`-t ígért, a konstruktor nem-nullable-t követelt.
+ * Payum-csomagban a bundle bootolását akadályozta meg — a `services.php`
+ * `nullOnInvalid()`-ot ígért, a konstruktor nem-nullable-t követelt.
  *
  * FONTOS KORLÁT, amit érdemes fejben tartani, mielőtt ehhez a teszthez új
- * külső függőséget adnánk a `services.xml`-ben:
+ * külső függőséget adnánk a `services.php`-ben:
  *
  * Ez a teszt bizonyítja, hogy
- *   1. a PLUGIN SAJÁT szolgáltatásai — a `services.xml`-ben deklarált
+ *   1. a PLUGIN SAJÁT szolgáltatásai — a `services.php`-ben deklarált
  *      definíciók és a mögöttük álló konstruktorok — együtt fordíthatók és
  *      példányosíthatók, a nullable logger szerződést is beleértve.
  *
  * Ez a teszt NEM tudja bizonyítani, hogy
- *   2. a `services.xml` által hivatkozott KÜLSŐ (Sylius/Payum) szolgáltatás-
+ *   2. a `services.php` által hivatkozott KÜLSŐ (Sylius/Payum) szolgáltatás-
  *      azonosítók valóban léteznek egy éles alkalmazásban — mert ez a teszt
  *      maga deklarálja őket szintetikusként, az `EXTERNAL_SERVICES` tömb
- *      alapján. Ha a `services.xml` egy külső azonosítót elgépel, a teszt
+ *      alapján. Ha a `services.php` egy külső azonosítót elgépel, a teszt
  *      által épített konténer attól még sikeresen fordul: a hibás
  *      azonosítót ugyanez a teszt regisztrálja be, amit épp ellenőrizni
  *      próbál — a hiba emiatt SZERKEZETILEG láthatatlan innen, nem
@@ -47,7 +47,7 @@ use Symfony\Component\Routing\RouterInterface;
  *
  * A 2. pontot ELLENŐRZŐ kapu a plugint befogadó alkalmazásban fut:
  * `bin/console lint:container` a valódi Sylius/Payum konténer ellen
- * validál, és pontosan egy ilyen hibát fogott meg (a `services.xml` egy
+ * validál, és pontosan egy ilyen hibát fogott meg (a `services.php` egy
  * nem létező `payum.reply_to_symfony_response_converter` azonosítót
  * hivatkozott a valódi `payum.converter.reply_to_http_response` helyett).
  * A plugin szándékosan nem szállít Sylius teszt-kernelt (lásd a README-t),
@@ -80,7 +80,7 @@ final class ContainerCompilationTest extends TestCase
      * dekorált szolgáltatás szintetikus. Ezért ezt az egyet egy valódi,
      * nulla kötelező paraméterrel példányosítható PSR-18 implementációval
      * (`Http\Mock\Client`) helyettesítjük — ez nem a plugin, hanem a teszt
-     * korlátja, a services.xml dekorálása emiatt nem változik.
+     * korlátja, a services.php dekorálása emiatt nem változik.
      */
     private const string DECORATED_INTERFACE_ID = 'Psr\Http\Client\ClientInterface';
 
@@ -196,7 +196,7 @@ final class ContainerCompilationTest extends TestCase
 
     public function testTheBundleStillWorksWithoutALoggerService(): void
     {
-        // A services.xml on-invalid="null"-t ígér a loggerre. Ha egy
+        // A services.php nullOnInvalid()-ot ígér a loggerre. Ha egy
         // konstruktor nem-nullable naplózót követel, ez a teszt bukik — a
         // Payum-csomagban pontosan ez akadályozta meg a bundle bootolását.
         $container = $this->compiledContainer(withLogger: false);
@@ -227,7 +227,7 @@ final class ContainerCompilationTest extends TestCase
         // egy magánjellegű, egyszer hivatkozott szolgáltatás, amit a
         // ContainerBuilder a fordítás során beágyaz a rögzítő argumentumába
         // — emiatt nem kereshető külön `has()`-sal, csak az alias jelzi
-        // megbízhatóan, hogy a decorates= tényleg lefutott.)
+        // megbízhatóan, hogy a decorate() tényleg lefutott.)
         self::assertTrue(
             $container->hasAlias(self::DECORATED_INTERFACE_ID),
             'Nem jött létre alias a dekorált szolgáltatásra — a dekorálás nem történt meg.',
