@@ -56,9 +56,9 @@ final class IpnController
     private readonly LoggerInterface $logger;
 
     /**
-     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * A `logger` a `services.php`-ben `nullOnInvalid()`, tehát a konténer
      * `null`-t ad, ha nincs naplózó. A paraméternek ezért nullable-nek KELL
-     * lennie: a Payum-csomagban pontosan ez a párosítás — `on-invalid="null"`
+     * lennie: a Payum-csomagban pontosan ez a párosítás — `nullOnInvalid()`
      * ígéret és nem-nullable konstruktor — akadályozta meg a bundle bootolását,
      * és csak a konténer-fordítási teszt találta meg.
      *

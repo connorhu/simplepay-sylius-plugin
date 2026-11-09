@@ -48,7 +48,7 @@ final class RecordingHttpClient implements ClientInterface
     private readonly LoggerInterface $logger;
 
     /**
-     * A `logger` a `services.xml`-ben `on-invalid="null"`, tehát a konténer
+     * A `logger` a `services.php`-ben `nullOnInvalid()`, tehát a konténer
      * `null`-t ad, ha nincs naplózó — a paraméter ezért nullable, ugyanaz a
      * minta, mint a `ReturnController`-ben és az `IpnController`-ben.
      */
